@@ -325,6 +325,16 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
                                                                 col_name,
                                                                 is_exist))) {
     }
+  } else if (table_item.is_file_table()) {
+    if (OB_ISNULL(table_item.file_table_def_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && !is_exist
+                        && i < table_item.file_table_def_->columns_.count(); ++i) {
+        is_exist = ObCharset::case_insensitive_equal(
+            table_item.file_table_def_->columns_.at(i).name_, col_name);
+      }
+    }
   } else if (table_item.is_values_table()) {
     ObSEArray<ObColumnRefRawExpr *, 4> values_desc;
     if (OB_ISNULL(dml_stmt_)) {

@@ -18,6 +18,9 @@
 
 #include "config_bridge.h"
 #include "ob_static_engine_cg.h"
+#include "sql/engine/basic/ob_file_table_op.h"
+#include "sql/engine/basic/ob_file_format.h"
+#include "sql/optimizer/ob_log_file_table.h"
 #include "sql/optimizer/ob_log_group_by.h"
 #include "sql/optimizer/ob_log_sort.h"
 #include "sql/optimizer/ob_log_limit.h"
@@ -5532,6 +5535,107 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   return ret;
 }
 
+
+namespace
+{
+
+int ob_file_table_column_type(common::ObObjType obj_type)
+{
+  int type = file_sql::FILE_COL_VARCHAR;
+  if (ob_is_integer_type(obj_type)) {
+    type = file_sql::FILE_COL_BIGINT;
+  } else if (ObDoubleType == obj_type || ObFloatType == obj_type) {
+    type = file_sql::FILE_COL_DOUBLE;
+  } else if (ObTinyIntType == obj_type || ObUTinyIntType == obj_type) {
+    type = file_sql::FILE_COL_BOOLEAN;
+  } else if (ObDateType == obj_type) {
+    type = file_sql::FILE_COL_DATE;
+  } else if (ObDateTimeType == obj_type || ObTimestampType == obj_type) {
+    type = file_sql::FILE_COL_DATETIME;
+  } else {
+    type = file_sql::FILE_COL_VARCHAR;
+  }
+  return type;
+}
+
+} // namespace
+
+int ObStaticEngineCG::generate_spec(ObLogFileTable &op, ObFileTableSpec &spec,
+                                    const bool in_root_job)
+{
+  UNUSED(in_root_job);
+  int ret = OB_SUCCESS;
+  // The inferred schema of the file is part of the plan, while the plan cache
+  // keys a statement by its literal-parameterized text.  Two statements that
+  // differ only in the file path would therefore share one plan, so a plan with
+  // a file table must never be cached.
+  phy_plan_->get_phy_plan_hint().plan_cache_policy_ = OB_USE_PLAN_CACHE_NONE;
+  ObIAllocator &alloc = phy_plan_->get_allocator();
+  const ObDMLStmt *stmt = op.get_stmt();
+  const TableItem *table_item = NULL;
+  const ObFileTableDef *def = NULL;
+  if (OB_ISNULL(stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(table_item = stmt->get_table_item_by_id(op.get_table_id()))
+             || OB_ISNULL(def = table_item->file_table_def_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_UNLIKELY(op.get_num_of_child() > 0)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(spec.column_exprs_.init(stmt->get_column_size()))
+             || OB_FAIL(spec.column_indexes_.init(stmt->get_column_size()))
+             || OB_FAIL(spec.column_types_.init(stmt->get_column_size()))
+             || OB_FAIL(spec.static_cells_.init(def->static_cells_.count()))) {
+  } else if (OB_FAIL(ob_write_string(alloc, def->path_, spec.path_))) {
+  } else if (OB_FAIL(ob_write_string(alloc, def->null_str_, spec.null_str_))) {
+  } else if (OB_FAIL(ob_write_string(alloc, def->json_format_, spec.json_format_))) {
+  } else {
+    spec.format_ = def->format_;
+    spec.delimiter_ = def->delimiter_;
+    spec.quote_ = def->quote_;
+    spec.escape_ = def->escape_;
+    spec.has_header_ = def->has_header_;
+    spec.sample_size_ = def->sample_size_;
+    spec.file_size_ = def->file_size_;
+    spec.file_mtime_ns_ = def->file_mtime_ns_;
+    spec.is_static_ = def->is_static_;
+    spec.static_column_count_ = def->static_column_count_;
+    for (int64_t i = 0; OB_SUCC(ret) && i < def->static_cells_.count(); ++i) {
+      ObString cell;
+      if (OB_FAIL(ob_write_string(alloc, def->static_cells_.at(i), cell))) {
+      } else if (OB_FAIL(spec.static_cells_.push_back(cell))) {
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < stmt->get_column_size(); ++i) {
+      ObExpr *rt_expr = NULL;
+      const ColumnItem *col_item = stmt->get_column_item(i);
+      if (OB_ISNULL(col_item) || OB_ISNULL(col_item->expr_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (col_item->table_id_ != op.get_table_id()
+                 || !col_item->expr_->is_explicited_reference()) {
+        // not a column of this file table
+      } else {
+        const int64_t column_index = col_item->column_id_ - OB_APP_MIN_COLUMN_ID;
+        if (OB_UNLIKELY(column_index < 0 || column_index >= def->columns_.count())) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("invalid file table column id", K(ret), K(column_index),
+                   K(def->columns_.count()));
+        } else if (OB_FAIL(mark_expr_self_produced(col_item->expr_))) {
+        } else if (OB_FAIL(generate_rt_expr(*col_item->expr_, rt_expr))) {
+        } else if (OB_ISNULL(rt_expr)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(spec.column_exprs_.push_back(rt_expr))) {
+        } else if (OB_FAIL(spec.column_indexes_.push_back(column_index))) {
+        } else if (OB_FAIL(spec.column_types_.push_back(
+                     def->columns_.at(column_index).file_type_))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObStaticEngineCG::generate_spec(ObLogJsonTable &op, ObJsonTableSpec &spec,
     const bool in_root_job)
 {
@@ -6121,6 +6225,10 @@ int ObStaticEngineCG::get_phy_op_type(ObLogicalOperator &log_op,
     }
     case log_op_def::LOG_JSON_TABLE: {
       type = PHY_JSON_TABLE;
+      break;
+    }
+    case log_op_def::LOG_FILE_TABLE: {
+      type = PHY_FILE_TABLE;
       break;
     }
     case log_op_def::LOG_MONITORING_DUMP: {

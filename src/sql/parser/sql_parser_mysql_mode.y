@@ -292,6 +292,8 @@ END_P SET_VAR DELIMITER
         GENERAL GEOMETRY GEOMCOLLECTION GEOMETRYCOLLECTION GET_FORMAT GLOBAL GRANTS GROUP_CONCAT GROUPING
         GLOBAL_ALIAS
 
+        READ_CSV READ_JSON READ_NDJSON READ_PARQUET GLOB
+
         HASH HEAP HELP HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH
 
         IDENTIFIED IK_MODE ILOG IMMEDIATE IMPORT INCLUDING INCR INDEXES INFO
@@ -511,6 +513,9 @@ END_P SET_VAR DELIMITER
 %type <node> column_list_with_boost with_param_column_ref
 %type <node> es_sql_opt
 %type <node> hybrid_search_expr hybrid_search_param
+%type <node> file_table_expr file_table_opt_tail file_opt_list file_opt_item file_opt_name file_opt_value
+%type <node> copy_stmt copy_opt_tail
+%type <node> file_table_func
 %type <node> vector_similarity_expr vector_similarity_metric
 %type <node> algorithm_opt lock_opt
 %type <node> flush_privileges_stmt opt_flush_privileges_scope
@@ -556,6 +561,7 @@ opt_end_p:
 /* only preparable statement will set question mark size */
 stmt:
     select_stmt             { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; question_mark_issue($$, result); }
   | insert_stmt             { $$ = $1; question_mark_issue($$, result); }
   | create_table_stmt       {
     $$ = $1;
@@ -10848,6 +10854,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 ;
 
 tbl_name:
@@ -17479,6 +17489,154 @@ literal
 }
 ;
 
+file_table_expr:
+file_table_func '(' literal file_table_opt_tail ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $4, NULL);
+  $$->value_ = $1->value_;
+}
+| file_table_func '(' literal file_table_opt_tail ')' relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $4, $6);
+  $$->value_ = $1->value_;
+}
+| file_table_func '(' literal file_table_opt_tail ')' AS relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $4, $7);
+  $$->value_ = $1->value_;
+}
+;
+
+file_table_func:
+READ_CSV
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 0;
+}
+| READ_JSON
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 1;
+}
+| READ_NDJSON
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 2;
+}
+| READ_PARQUET
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 3;
+}
+| GLOB
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 4;
+}
+;
+
+file_table_opt_tail:
+/* empty */
+{
+  $$ = NULL;
+}
+| ',' file_opt_list
+{
+  $$ = $2;
+}
+;
+
+file_opt_list:
+file_opt_item
+{
+  $$ = $1;
+}
+| file_opt_list ',' file_opt_item
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_opt_item:
+file_opt_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 1, NULL);
+  $$->str_value_ = $1->str_value_;
+  $$->str_len_ = $1->str_len_;
+}
+| file_opt_name file_opt_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 1, $2);
+  $$->str_value_ = $1->str_value_;
+  $$->str_len_ = $1->str_len_;
+}
+| file_opt_name COMP_EQ file_opt_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 1, $3);
+  $$->str_value_ = $1->str_value_;
+  $$->str_len_ = $1->str_len_;
+}
+;
+
+file_opt_value:
+literal
+{
+  $$ = $1;
+}
+| '-' INTNUM
+{
+  $2->value_ = -$2->value_;
+  int32_t len = $2->str_len_ + 2;
+  char *str_value = (char *)parse_malloc(len, result->malloc_pool_);
+  if (OB_LIKELY(NULL != str_value)) {
+    snprintf(str_value, len, "-%.*s", (int32_t)($2->str_len_), $2->str_value_);
+    $2->str_value_ = str_value;
+    $2->str_len_ = len - 1;
+  }
+  $$ = $2;
+}
+| '-' DECIMAL_VAL
+{
+  int32_t len = $2->str_len_ + 2;
+  char *str_value = (char *)parse_malloc(len, result->malloc_pool_);
+  if (OB_LIKELY(NULL != str_value)) {
+    snprintf(str_value, len, "-%.*s", (int32_t)($2->str_len_), $2->str_value_);
+    $2->str_value_ = str_value;
+    $2->str_len_ = len - 1;
+  }
+  $$ = $2;
+}
+;
+
+file_opt_name:
+relation_name
+{
+  $$ = $1;
+}
+| DELIMITER
+{
+  make_name_node($$, result->malloc_pool_, "delimiter");
+}
+;
+
+copy_stmt:
+COPY '(' select_stmt ')' TO STRING_VALUE copy_opt_tail
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_STMT, 3, $3, $6, $7);
+}
+;
+
+copy_opt_tail:
+/* empty */
+{
+  $$ = NULL;
+}
+| '(' file_opt_list ')'
+{
+  $$ = $2;
+}
+;
+
 unreserved_keyword:
 unreserved_keyword_for_role_name { $$=$1;}
 | unreserved_keyword_ambiguous_roles { $$=$1;}
@@ -18181,6 +18339,11 @@ ACCOUNT
 |       INCONSISTENT 
 |       INDIVIDUAL
 |       HYBRID_SEARCH
+|       READ_CSV
+|       READ_JSON
+|       READ_NDJSON
+|       READ_PARQUET
+|       GLOB
 ;
 
 unreserved_keyword_special:

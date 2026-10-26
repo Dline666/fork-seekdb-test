@@ -2446,6 +2446,19 @@
     "background_cn": "",
     "ref_url": ""
   },
+  "enable_file_sql": {
+    "id": 10103,
+    "name": "enable_file_sql",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "enable reading local csv, json and parquet files through table functions",
+    "flags": "SESSION | NEED_SERIALIZE | INFLUENCE_PLAN",
+    "publish_version": "226",
+    "info_cn": "开启后允许通过 read_csv/read_json/read_parquet 直接查询本地文件",
+    "background_cn": "",
+    "ref_url": ""
+  },
   "secure_file_priv": {
     "id": 10102,
     "name": "secure_file_priv",

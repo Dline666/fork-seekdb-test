@@ -997,6 +997,7 @@ int ObSelectResolver::resolve_normal_query(const ParseNode &parse_tree)
   return ret;
 }
 
+
 int ObSelectResolver::resolve(const ParseNode &parse_tree)
 {
   int ret = OB_SUCCESS;
@@ -1653,6 +1654,9 @@ int ObSelectResolver::expand_target_list(
     }
   } else if (table_item.is_json_table()) {
     if (OB_FAIL(resolve_all_json_table_columns(table_item, &column_items))) {
+    }
+  } else if (table_item.is_file_table()) {
+    if (OB_FAIL(resolve_all_file_table_columns(table_item, column_items))) {
     }
   } else if (table_item.is_values_table()) {
     if (OB_ISNULL(get_stmt()) || OB_UNLIKELY(get_stmt()->get_column_size() == 0)) {

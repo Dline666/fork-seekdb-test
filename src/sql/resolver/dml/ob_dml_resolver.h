@@ -207,6 +207,19 @@ public:
                                   TableItem *&table_item);
   int resolve_json_table_item(const ParseNode &table_node,
                               TableItem *&table_item);
+  // resolve a read_csv()/read_json()/read_parquet()/glob() table function
+  int resolve_file_table_item(const ParseNode &table_node, TableItem *&table_item);
+  int build_file_table_def(const ParseNode &parse_tree, ObFileTableDef *&table_def);
+  int infer_file_table_schema(ObFileTableDef &table_def);
+  int resolve_file_table_column_item(const TableItem &table_item,
+                                     const common::ObString &column_name,
+                                     ColumnItem *&col_item);
+  int create_file_table_column_item(const TableItem &table_item,
+                                    const ObFileTableColumn &column,
+                                    const int64_t column_index,
+                                    ColumnItem *&col_item);
+  int resolve_all_file_table_columns(const TableItem &table_item,
+                                     ObIArray<ColumnItem> &column_items);
   int resolve_unnest_item(const ParseNode &table_node, TableItem *&table_item);
   int create_unnest_table_item(TableItem *&table_item, ObString table_name);
   int unnest_table_add_column(TableItem *&table_item, ColumnItem *&col_item, ObString col_name);

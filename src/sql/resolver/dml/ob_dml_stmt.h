@@ -87,6 +87,61 @@ typedef struct ObJtColBaseInfo
    K_(output_column_idx), K_(col_name), K_(path), K_(parent_id), K_(id));
 } ObJtColBaseInfo;
 
+// Format of a file table function: read_csv/read_json/read_ndjson/read_parquet/glob.
+enum ObFileTableFormat : int64_t
+{
+  OB_FILE_TABLE_CSV = 0,
+  OB_FILE_TABLE_JSON = 1,
+  OB_FILE_TABLE_NDJSON = 2,
+  OB_FILE_TABLE_PARQUET = 3,
+  OB_FILE_TABLE_GLOB = 4,
+};
+
+struct ObFileTableColumn
+{
+  ObFileTableColumn()
+    : name_(), type_(common::ObNullType), accuracy_(), cs_type_(common::CS_TYPE_UTF8MB4_GENERAL_CI),
+      nullable_(true), file_type_(3) {}
+  common::ObString name_;
+  common::ObObjType type_;
+  common::ObAccuracy accuracy_;
+  common::ObCollationType cs_type_;
+  bool nullable_;
+  // The inferred file type (file_sql::FileColumnType) behind the SQL type.
+  int64_t file_type_;
+  TO_STRING_KV(K_(name), K_(type), K_(nullable), K_(file_type));
+};
+
+// Runtime description of a file table item.  The schema is inferred when the
+// statement is resolved; the scan itself is performed by ObFileTableOp.
+struct ObFileTableDef
+{
+  ObFileTableDef()
+    : path_(), format_(OB_FILE_TABLE_CSV), delimiter_(','), quote_('"'), escape_('"'),
+      has_header_(true), null_str_(), json_format_(), sample_size_(-1), file_size_(0),
+      file_mtime_ns_(0), row_count_(0), is_static_(false), static_column_count_(0),
+      columns_(), static_cells_() {}
+  int deep_copy(const ObFileTableDef &src, common::ObIAllocator &allocator);
+  common::ObString path_;
+  int64_t format_;
+  int64_t delimiter_;
+  int64_t quote_;
+  int64_t escape_;
+  bool has_header_;
+  common::ObString null_str_;
+  common::ObString json_format_;
+  int64_t sample_size_;
+  int64_t file_size_;
+  int64_t file_mtime_ns_;
+  int64_t row_count_;
+  // A static table (glob() and DESCRIBE) carries its rows in the definition.
+  bool is_static_;
+  int64_t static_column_count_;
+  common::ObSEArray<ObFileTableColumn, 8, common::ModulePageAllocator, true> columns_;
+  common::ObSEArray<common::ObString, 16, common::ModulePageAllocator, true> static_cells_;
+  TO_STRING_KV(K_(path), K_(format), K_(row_count), K_(is_static), K_(columns));
+};
+
 typedef struct ObJsonTableDef {
   ObJsonTableDef() 
     : all_cols_(),
@@ -155,6 +210,7 @@ struct TableItem
     json_table_def_ = nullptr;
     table_type_ = MAX_TABLE_TYPE;
     values_table_def_ = NULL;
+    file_table_def_ = NULL;
     sample_info_ = nullptr;
   }
 
@@ -190,6 +246,7 @@ struct TableItem
     JSON_TABLE,
     VALUES_TABLE,
     LATERAL_TABLE,
+    FILE_TABLE,
   };
 
   /**
@@ -226,6 +283,7 @@ struct TableItem
   bool is_values_table() const { return VALUES_TABLE == type_; }//used to mark values statement: values row(1,2), row(3,4);
 
   bool is_lateral_table() const { return LATERAL_TABLE == type_; }
+  bool is_file_table() const { return FILE_TABLE == type_; }
   bool is_extended_all_or_user_sys_view() const
   {
     return (is_extended_sys_view_table(ref_id_) && (table_name_.prefix_match("USER_") || table_name_.prefix_match("ALL_")));
@@ -263,6 +321,9 @@ struct TableItem
   int deep_copy_values_table_def(const ObValuesTableDef& table_def,
                                  ObIRawExprCopier &expr_copier,
                                  ObIAllocator* allocator);
+  int deep_copy_file_table_def(const ObFileTableDef &table_def,
+                               ObIAllocator &allocator);
+  ObFileTableDef *get_file_table_def() { return file_table_def_; }
   virtual bool has_for_update() const { return for_update_; }
   // if real table id, it is valid for all threads,
   // else if generated id, it is unique just during the thread session
@@ -303,6 +364,8 @@ struct TableItem
   ObJsonTableDef *json_table_def_;
   // values table
   ObValuesTableDef *values_table_def_;
+  // file table (read_csv/read_json/read_parquet/glob)
+  ObFileTableDef *file_table_def_;
   // sample scan infos
   SampleInfo *sample_info_;
 };
