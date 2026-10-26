@@ -77,7 +77,7 @@ int ObAIFuncClient::init(common::ObIAllocator &allocator, const common::ObString
 {
   int ret = OB_SUCCESS;
   int64_t remain_timeout_us = THIS_WORKER.is_timeout_ts_valid() ? THIS_WORKER.get_timeout_remain() : timeout_sec_ * 1000000;
-  if (OB_ISNULL(url) || headers.empty()) {
+  if (OB_ISNULL(url) || url.empty()) {
     ret = OB_INVALID_ARGUMENT;
   } else {
     allocator_ = &allocator;
@@ -90,13 +90,25 @@ int ObAIFuncClient::init(common::ObIAllocator &allocator, const common::ObString
     abs_timeout_ts_ = remain_timeout_us + ObTimeUtility::current_time();
     if (OB_SUCC(ret)){
       const uint32_t num_headers = headers.count();
+      bool has_content_type = false;
       for (uint32_t i = 0; OB_SUCC(ret) && i < num_headers; ++i) {
         ObString header_c_str;
         if (OB_FAIL(ob_write_string(*allocator_, headers.at(i), header_c_str, true))) {
         } else if (OB_ISNULL(header_list_ = curl_slist_append(header_list_, header_c_str.ptr()))) {
           ret = OB_ERR_UNEXPECTED;
         } else {
+          if (HEADER_KEY_LEN <= header_c_str.length()
+              && 0 == strncasecmp(header_c_str.ptr(), HEADER_CONTENT_TYPE_KEY, HEADER_KEY_LEN)) {
+            has_content_type = true;
+          }
           LOG_DEBUG("ai_function, header:", K(headers.at(i)));
+        }
+      }
+      // A provider without authentication (Ollama) supplies no header at all,
+      // but every request still has to declare a json body.
+      if (OB_SUCC(ret) && !has_content_type) {
+        if (OB_ISNULL(header_list_ = curl_slist_append(header_list_, HEADER_CONTENT_TYPE_VALUE))) {
+          ret = OB_ERR_UNEXPECTED;
         }
       }
     }

@@ -59,6 +59,10 @@ private:
   bool is_timeout();
 private:
   static const int64_t CURL_MAX_TIMEOUT_SEC;
+  // Every request posts json, even when the provider supplies no header of its own.
+  static constexpr int32_t HEADER_KEY_LEN = static_cast<int32_t>(sizeof("Content-Type") - 1);
+  static constexpr char HEADER_CONTENT_TYPE_KEY[] = "Content-Type";
+  static constexpr char HEADER_CONTENT_TYPE_VALUE[] = "Content-Type: application/json";
   common::ObIAllocator *allocator_;
   char *url_;
   struct curl_slist *header_list_;
