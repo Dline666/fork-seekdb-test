@@ -210,6 +210,10 @@ protected:
 public:
   int resolve_all_function_table_columns(const TableItem &table_item, ObIArray<ColumnItem> *column_items);
   int resolve_all_json_table_columns(const TableItem &table_item, ObIArray<ColumnItem> *column_items);
+  // COPY (query) TO 'path' (format csv, header, ...) — resolved as a select
+  // statement with an attached select-into item.
+  int resolve_copy_stmt(const ParseNode &copy_node);
+  int build_copy_into(const ParseNode &copy_node);
   int resolve_all_generated_table_columns(const TableItem &table_item, common::ObIArray<ColumnItem> *column_items);
 protected:
   virtual int set_select_item(SelectItem &select_item, bool is_auto_gen);

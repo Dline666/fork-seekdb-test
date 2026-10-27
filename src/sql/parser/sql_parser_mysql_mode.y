@@ -17606,6 +17606,10 @@ literal
   }
   $$ = $2;
 }
+| relation_name
+{
+  $$ = $1;
+}
 ;
 
 file_opt_name:

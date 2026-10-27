@@ -5489,6 +5489,15 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       spec.cs_type_ = op.get_cs_type();
       spec.parallel_ = op.get_parallel();
       spec.is_overwrite_ = op.get_is_overwrite();
+      spec.has_header_ = op.get_has_header();
+      if (OB_FAIL(ob_write_string(alloc, op.get_null_str(), spec.null_str_))) {
+      } else if (OB_FAIL(ob_write_string(alloc, op.get_header_line(), spec.header_line_))) {
+      }
+      if (OB_SUCC(ret) && op.get_is_copy()) {
+        // COPY plans must not be cached: the target path is a literal baked into
+        // the plan while the cache keys by the parameterized text.
+        phy_plan_->get_phy_plan_hint().plan_cache_policy_ = OB_USE_PLAN_CACHE_NONE;
+      }
       spec.plan_->need_drive_dml_query_ = true;
     }
   }
@@ -5535,30 +5544,6 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   return ret;
 }
 
-
-namespace
-{
-
-int ob_file_table_column_type(common::ObObjType obj_type)
-{
-  int type = file_sql::FILE_COL_VARCHAR;
-  if (ob_is_integer_type(obj_type)) {
-    type = file_sql::FILE_COL_BIGINT;
-  } else if (ObDoubleType == obj_type || ObFloatType == obj_type) {
-    type = file_sql::FILE_COL_DOUBLE;
-  } else if (ObTinyIntType == obj_type || ObUTinyIntType == obj_type) {
-    type = file_sql::FILE_COL_BOOLEAN;
-  } else if (ObDateType == obj_type) {
-    type = file_sql::FILE_COL_DATE;
-  } else if (ObDateTimeType == obj_type || ObTimestampType == obj_type) {
-    type = file_sql::FILE_COL_DATETIME;
-  } else {
-    type = file_sql::FILE_COL_VARCHAR;
-  }
-  return type;
-}
-
-} // namespace
 
 int ObStaticEngineCG::generate_spec(ObLogFileTable &op, ObFileTableSpec &spec,
                                     const bool in_root_job)

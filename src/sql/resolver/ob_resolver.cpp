@@ -238,6 +238,10 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_SELECT_STMT_RESOLVER(Select);
         break;
       }
+      case T_COPY_STMT: {
+        REGISTER_SELECT_STMT_RESOLVER(Select);
+        break;
+      }
       case T_INSERT: {
         REGISTER_STMT_RESOLVER(Insert);
         break;

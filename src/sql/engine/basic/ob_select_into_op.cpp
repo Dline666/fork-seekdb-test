@@ -38,7 +38,7 @@ OB_SERIALIZE_MEMBER(ObSelectIntoOpInput, task_id_, sqc_id_);
 OB_SERIALIZE_MEMBER((ObSelectIntoSpec, ObOpSpec), into_type_, user_vars_, outfile_name_,
     field_str_, line_str_, closed_cht_, is_optional_, select_exprs_, is_single_, max_file_size_,
     escaped_cht_, cs_type_, parallel_, buffer_size_, is_overwrite_,
-    external_properties_);
+    external_properties_, has_header_, null_str_, header_line_);
 
 
 int ObSelectIntoOp::inner_open()
@@ -50,6 +50,7 @@ int ObSelectIntoOp::inner_open()
   } else {
     // since we call get_next_row in inner_open, we have to set opened_ first in avoid to a infinite loop.
     opened_ = true;
+    header_written_ = false;
     if (OB_FAIL(session->get_sql_select_limit(top_limit_cnt_))) {
     }
   }
@@ -932,8 +933,15 @@ int ObSelectIntoOp::print_field(const ObObj &obj, ObCsvFileWriter &data_writer)
   if (!has_escape_) {
     OZ(write_obj_to_file(obj, data_writer, false));
   } else if (obj.is_null()) {
-    OZ(write_single_char_to_file(&char_escape_, data_writer));
-    OZ(write_single_char_to_file(&char_n, data_writer));
+    if (!MY_SPEC.null_str_.empty()) {
+      ObObj null_obj;
+      null_obj.set_varchar(MY_SPEC.null_str_);
+      null_obj.set_collation_type(ObCharset::get_system_collation());
+      OZ(write_obj_to_file(null_obj, data_writer, false));
+    } else {
+      OZ(write_single_char_to_file(&char_escape_, data_writer));
+      OZ(write_single_char_to_file(&char_n, data_writer));
+    }
   } else {
     OZ(write_obj_to_file(obj, data_writer, true));
   }
@@ -995,6 +1003,18 @@ int ObSelectIntoOp::into_outfile_batch_csv(const ObBatchRows &brs, ObExternalFil
   for (int64_t i = 0; OB_SUCC(ret) && i < select_exprs.count(); ++i) {
     if (OB_FAIL(select_exprs.at(i)->eval_batch(eval_ctx_, *brs.skip_, brs.size_))) {
     } else if (OB_FAIL(datum_vectors.push_back(select_exprs.at(i)->locate_expr_datumvector(eval_ctx_)))) {
+    }
+  }
+  if (OB_SUCC(ret) && !header_written_ && MY_SPEC.has_header_) {
+    ObObj header_obj;
+    header_obj.set_varchar(MY_SPEC.header_line_);
+    header_obj.set_collation_type(ObCharset::get_system_collation());
+    if (OB_ISNULL(csv_data_writer = static_cast<ObCsvFileWriter *>(data_writer))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(write_obj_to_file(header_obj, *csv_data_writer, false))) {
+    } else if (OB_FAIL(write_obj_to_file(line_str_, *csv_data_writer))) {
+    } else {
+      header_written_ = true;
     }
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < brs.size_; ++i) {

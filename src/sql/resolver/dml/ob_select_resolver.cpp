@@ -998,6 +998,260 @@ int ObSelectResolver::resolve_normal_query(const ParseNode &parse_tree)
 }
 
 
+
+namespace
+{
+
+int ob_copy_get_text(const ParseNode *node, ObString &text)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(node)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (NULL != node->str_value_ && node->str_len_ > 0) {
+    text.assign_ptr(node->str_value_, static_cast<int32_t>(node->str_len_));
+  } else if (NULL != node->raw_text_ && node->text_len_ > 0) {
+    text.assign_ptr(node->raw_text_, static_cast<int32_t>(node->text_len_));
+  } else {
+    ret = OB_INVALID_ARGUMENT;
+  }
+  return ret;
+}
+
+int ob_copy_flatten(const ParseNode *node, ObIArray<const ParseNode *> &options)
+{
+  int ret = OB_SUCCESS;
+  if (NULL == node) {
+  } else if (T_LINK_NODE == node->type_) {
+    if (OB_ISNULL(node->children_[0]) || OB_ISNULL(node->children_[1])) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(ob_copy_flatten(node->children_[0], options))) {
+    } else if (OB_FAIL(ob_copy_flatten(node->children_[1], options))) {
+    }
+  } else if (OB_FAIL(options.push_back(node))) {
+  }
+  return ret;
+}
+
+int ob_copy_bool(const ParseNode *value, bool &result)
+{
+  int ret = OB_SUCCESS;
+  ObString text;
+  if (OB_ISNULL(value)) {
+    result = true;
+  } else if (T_BOOL == value->type_) {
+    result = (1 == value->value_);
+  } else if (OB_SUCC(ob_copy_get_text(value, text))) {
+    if (0 == text.case_compare("true") || 0 == text.case_compare("on")
+        || 0 == text.case_compare("yes") || 0 == text.case_compare("1")) {
+      result = true;
+    } else if (0 == text.case_compare("false") || 0 == text.case_compare("off")
+               || 0 == text.case_compare("no") || 0 == text.case_compare("0")) {
+      result = false;
+    } else {
+      ret = OB_INVALID_ARGUMENT;
+    }
+  }
+  return ret;
+}
+
+int ob_copy_char(const ParseNode *value, int64_t &result)
+{
+  int ret = OB_SUCCESS;
+  ObString text;
+  if (OB_ISNULL(value)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (T_INT == value->type_ && value->value_ > 0 && value->value_ < 256) {
+    result = value->value_;
+  } else if (OB_SUCC(ob_copy_get_text(value, text)) && 1 == text.length()) {
+    result = static_cast<unsigned char>(text.ptr()[0]);
+  } else {
+    ret = OB_INVALID_ARGUMENT;
+  }
+  return ret;
+}
+
+} // namespace
+
+int ObSelectResolver::resolve_copy_stmt(const ParseNode &copy_node)
+{
+  int ret = OB_SUCCESS;
+  const ParseNode *select_node = copy_node.num_child_ > 0 ? copy_node.children_[0] : NULL;
+  if (OB_ISNULL(select_node) || T_SELECT != select_node->type_) {
+    ret = OB_ERR_PARSER_SYNTAX;
+    LOG_WARN("COPY expects a select statement", K(ret));
+  } else if (OB_FAIL(resolve_outline_data_hints())) {
+  } else if (NULL != select_node->children_[PARSE_SELECT_SET]) {
+    OZ(SMART_CALL(resolve_set_query(*select_node)));
+  } else {
+    OZ(SMART_CALL(resolve_normal_query(*select_node)));
+  }
+  if (OB_SUCC(ret) && OB_FAIL(build_copy_into(copy_node))) {
+  }
+  return ret;
+}
+
+int ObSelectResolver::build_copy_into(const ParseNode &copy_node)
+{
+  int ret = OB_SUCCESS;
+  ObSelectStmt *select_stmt = get_select_stmt();
+  ObSelectIntoItem *into_item = NULL;
+  const ParseNode *path_node = copy_node.num_child_ > 1 ? copy_node.children_[1] : NULL;
+  const ParseNode *option_node = copy_node.num_child_ > 2 ? copy_node.children_[2] : NULL;
+  ObString path;
+  int64_t delimiter = ',';
+  int64_t quote = '"';
+  int64_t escape = '"';
+  bool header = true;
+  ObString null_str;
+  int64_t enable_file_sql = 0;
+  CK(OB_NOT_NULL(allocator_));
+  CK(OB_NOT_NULL(select_stmt));
+  CK(OB_NOT_NULL(session_info_));
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(session_info_->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enable_file_sql))) {
+      LOG_WARN("failed to get enable_file_sql", K(ret));
+    } else if (0 == enable_file_sql) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "copy, execute 'set session enable_file_sql = on' first");
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(ob_copy_get_text(path_node, path)) || path.empty()) {
+      ret = OB_ERR_PARSER_SYNTAX;
+      LOG_WARN("COPY target path must be a non empty string literal", K(ret));
+    }
+  }
+  if (OB_SUCC(ret) && NULL != option_node) {
+    ObSEArray<const ParseNode *, 8> options;
+    if (OB_FAIL(ob_copy_flatten(option_node, options))) {
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < options.count(); ++i) {
+      const ParseNode *option = options.at(i);
+      const ParseNode *value = NULL;
+      ObString name;
+      if (OB_ISNULL(option) || OB_FAIL(ob_copy_get_text(option, name))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (1 == option->num_child_) {
+        value = option->children_[0];
+      }
+      if (OB_FAIL(ret)) {
+      } else if (0 == name.case_compare("format")) {
+        ObString format;
+        if (OB_FAIL(ob_copy_get_text(value, format)) || 0 != format.case_compare("csv")) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "copy format, only csv is supported");
+        }
+      } else if (0 == name.case_compare("header") || 0 == name.case_compare("has_header")) {
+        OZ(ob_copy_bool(value, header));
+      } else if (0 == name.case_compare("nullstr") || 0 == name.case_compare("null_str")) {
+        OZ(ob_copy_get_text(value, null_str));
+      } else if (0 == name.case_compare("delimiter") || 0 == name.case_compare("delim")) {
+        OZ(ob_copy_char(value, delimiter));
+      } else if (0 == name.case_compare("quote")) {
+        OZ(ob_copy_char(value, quote));
+      } else if (0 == name.case_compare("escape")) {
+        OZ(ob_copy_char(value, escape));
+      } else {
+        ret = OB_ERR_PARSER_SYNTAX;
+        LOG_WARN("unknown copy option", K(ret), K(name));
+      }
+    }
+  }
+  // the target must not exist yet
+  if (OB_SUCC(ret)) {
+    const std::string path_str(path.ptr(), path.length());
+    FILE *probe = ::fopen(path_str.c_str(), "rb");
+    if (NULL != probe) {
+      ::fclose(probe);
+      ret = OB_FILE_ALREADY_EXIST;
+      LOG_USER_ERROR(OB_FILE_ALREADY_EXIST);
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_ISNULL(into_item = static_cast<ObSelectIntoItem *>(
+                    allocator_->alloc(sizeof(ObSelectIntoItem))))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      new (into_item) ObSelectIntoItem();
+      into_item->into_type_ = T_INTO_OUTFILE;
+      into_item->is_optional_ = false;
+      into_item->is_single_ = true;
+      into_item->has_header_ = header;
+      into_item->is_copy_ = true;
+      into_item->outfile_name_.set_varchar(path);
+      into_item->outfile_name_.set_collation_type(ObCharset::get_system_collation());
+      char *delim_buf = NULL;
+      char *quote_buf = NULL;
+      char *escape_buf = NULL;
+      if (OB_ISNULL(delim_buf = static_cast<char *>(allocator_->alloc(1)))
+          || OB_ISNULL(quote_buf = static_cast<char *>(allocator_->alloc(1)))
+          || OB_ISNULL(escape_buf = static_cast<char *>(allocator_->alloc(1)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        delim_buf[0] = static_cast<char>(delimiter);
+        quote_buf[0] = static_cast<char>(quote);
+        escape_buf[0] = static_cast<char>(escape);
+        into_item->field_str_.set_varchar(ObString(1, delim_buf));
+        into_item->field_str_.set_collation_type(ObCharset::get_system_collation());
+        into_item->closed_cht_.meta_.set_char();
+        into_item->closed_cht_.set_char_value(quote_buf, 1);
+        into_item->closed_cht_.set_collation_type(ObCharset::get_system_collation());
+        into_item->escaped_cht_.meta_.set_char();
+        into_item->escaped_cht_.set_char_value(escape_buf, 1);
+        into_item->escaped_cht_.set_collation_type(ObCharset::get_system_collation());
+        if (OB_FAIL(ob_write_string(*allocator_, null_str, into_item->null_str_))) {
+        }
+      }
+    }
+  }
+  // build the header line from the output column names
+  if (OB_SUCC(ret) && header) {
+    std::string header;
+    const char delim = static_cast<char>(delimiter);
+    const char q = static_cast<char>(quote);
+    for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
+      const SelectItem &item = select_stmt->get_select_item(i);
+      ObString name = item.alias_name_.empty() ? item.expr_name_ : item.alias_name_;
+      if (name.empty()) {
+        name = ObString::make_string("column");
+      }
+      bool need_quote = false;
+      for (int64_t j = 0; j < name.length(); ++j) {
+        const char c = name.ptr()[j];
+        if (c == delim || c == q || c == '\n' || c == '\r') {
+          need_quote = true;
+          break;
+        }
+      }
+      if (need_quote) {
+        header.push_back(q);
+      }
+      for (int64_t j = 0; j < name.length(); ++j) {
+        const char c = name.ptr()[j];
+        if (c == q) {
+          header.push_back(q);
+        }
+        header.push_back(c);
+      }
+      if (need_quote) {
+        header.push_back(q);
+      }
+      if (i != select_stmt->get_select_item_size() - 1) {
+        header.push_back(delim);
+      }
+    }
+    if (OB_SUCC(ret)) {
+      const ObString header_str(static_cast<int32_t>(header.size()), header.data());
+      if (OB_FAIL(ob_write_string(*allocator_, header_str, into_item->header_line_))) {
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    select_stmt->set_select_into(into_item);
+  }
+  return ret;
+}
+
 int ObSelectResolver::resolve(const ParseNode &parse_tree)
 {
   int ret = OB_SUCCESS;
@@ -1035,7 +1289,10 @@ int ObSelectResolver::resolve(const ParseNode &parse_tree)
      */
 
     // resolve outline data hint first
-    if (OB_FAIL(resolve_outline_data_hints())) {
+    if (T_COPY_STMT == parse_tree.type_) {
+      if (OB_FAIL(SMART_CALL(resolve_copy_stmt(parse_tree)))) {
+      }
+    } else if (OB_FAIL(resolve_outline_data_hints())) {
     } else if (parse_tree.children_[PARSE_SELECT_SET] != NULL) {
       /* resolve set clause */
       if (OB_FAIL(SMART_CALL(resolve_set_query(parse_tree)))) {
