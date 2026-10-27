@@ -42,6 +42,36 @@ public:
   virtual bool need_rt_ctx() const override { return true; }
  
 private:
+  // One document score reported by the model. index_ is the position of the
+  // document in the caller supplied array, never the position in a batch.
+  struct RerankScore
+  {
+    RerankScore() : index_(-1), score_(0), score_node_(NULL) {}
+    RerankScore(const int64_t index, const double score, common::ObJsonNode *score_node)
+        : index_(index), score_(score), score_node_(score_node) {}
+    int64_t index_;
+    double score_;
+    common::ObJsonNode *score_node_;
+  };
+
+  struct RerankScoreDescCmp
+  {
+    bool operator()(const RerankScore &left, const RerankScore &right) const
+    {
+      // Higher score first; equal scores keep the original document order.
+      return left.score_ > right.score_
+             || (left.score_ == right.score_ && left.index_ < right.index_);
+    }
+  };
+
+  struct RerankIndexAscCmp
+  {
+    bool operator()(const RerankScore &left, const RerankScore &right) const
+    {
+      return left.index_ < right.index_;
+    }
+  };
+
   static int inner_eval_ai_rerank(common::ObIAllocator &allocator, 
                                   const common::ObAIFuncExprInfo &info, 
                                   const share::ObAiModelEndpointInfo &endpoint_info,
@@ -50,15 +80,28 @@ private:
                                   common::ObJsonArray *document_array, 
                                   common::ObJsonArray *&result_array);
   
-  static int eval_ai_rerank_with_doc_key(const ObExpr &expr, ObEvalCtx &ctx, common::ObIAllocator &allocator,
-                                         common::ObString &model_id, common::ObString &query, common::ObJsonArray *document_array,
-                                         common::ObString &doc_key, const common::ObAIFuncExprInfo &info, const share::ObAiModelEndpointInfo &endpoint_info, ObDatum &res);
   static int get_doc_array_from_documents_array_with_key(ObIAllocator &allocator, ObJsonArray *document_object_array, ObString &doc_key, ObJsonArray *&doc_array);
-  static int sort_document_array_by_model_result(common::ObIAllocator &allocator, common::ObJsonArray *document_array, common::ObJsonArray *model_result_array, common::ObJsonArray *&sorted_document_array);
   static int construct_config_json(common::ObIAllocator &allocator, int64_t top_k, int64_t return_doc, common::ObJsonObject *&config_json);
   static int construct_batch_document_array(common::ObIAllocator &allocator, common::ObJsonArray *document_array, int64_t start_idx, int64_t end_idx, common::ObJsonArray *&batch_document_array);
-  static int batch_result_add_base(common::ObIAllocator &allocator, common::ObJsonArray *array, int64_t start_idx);
-  static int compact_json_array_by_key(common::ObIAllocator &allocator, common::ObJsonArray *array1, common::ObJsonArray *array2, common::ObString &score_key, common::ObJsonArray *&compact_array);
+  // Batch every document of the array and collect one score per document.
+  static int collect_rerank_scores(common::ObIAllocator &allocator,
+                                   const common::ObAIFuncExprInfo &info,
+                                   const share::ObAiModelEndpointInfo &endpoint_info,
+                                   common::ObString &query,
+                                   common::ObJsonArray *document_array,
+                                   common::ObArray<RerankScore> &scores);
+  static int append_batch_scores(common::ObIAllocator &allocator,
+                                 common::ObJsonArray *batch_result_array,
+                                 const int64_t batch_start,
+                                 const int64_t batch_size,
+                                 common::ObArray<RerankScore> &scores);
+  // Verify that every document got exactly one score.
+  static int check_score_coverage(common::ObArray<RerankScore> &scores, const int64_t document_count);
+  static int build_rerank_result(common::ObIAllocator &allocator,
+                                 common::ObJsonArray *document_array,
+                                 common::ObArray<RerankScore> &scores,
+                                 const bool with_document,
+                                 common::ObJsonArray *&result_array);
   static constexpr int MODEL_IDX = 0;
   static constexpr int QUERY_IDX = 1;
   static constexpr int DOCUMENTS_IDX = 2;

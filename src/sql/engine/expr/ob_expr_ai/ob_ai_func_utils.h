@@ -245,6 +245,8 @@ public:
   static int get_json_object_form_str(ObIAllocator &allocator, ObString &str, ObJsonObject *&obj_node);
   static int print_json_to_str(ObIAllocator &allocator, ObIJsonBase *base_node, ObString &str);
   static int compact_json_object(ObIAllocator &allocator, ObJsonObject *obj_node, ObJsonObject *compact_obj);
+  // json number covers integer/decimal/double, i.e. the only legal embedding elements.
+  static bool is_json_number(const ObIJsonBase &node);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObAIFuncJsonUtils);
 };
@@ -281,6 +283,13 @@ class ObAIFuncUtils
 public:
   ObAIFuncUtils() {}
   virtual ~ObAIFuncUtils() {}
+  // Upper bounds for a single model request. A larger row batch is split into
+  // several requests so that one statement never sends one giant payload.
+  static constexpr int64_t MAX_EMBED_BATCH_INPUTS = 64;
+  static constexpr int64_t MAX_RERANK_BATCH_DOCUMENTS = 20;
+  // Check that a model returned vector is a non empty array of json numbers and
+  // report its element count as the vector dimension.
+  static int check_embedding_vector(const ObIJsonBase &vector_node, int64_t &dimension);
   static bool is_completion_type(const ObAIFuncExprInfo *info) {return info->type_ == share::EndpointType::COMPLETION;}
   static bool is_dense_embedding_type(const ObAIFuncExprInfo *info) {return info->type_ == share::EndpointType::DENSE_EMBEDDING;}
   static bool is_rerank_type(const ObAIFuncExprInfo *info) {return info->type_ == share::EndpointType::RERANK;}
@@ -379,6 +388,11 @@ public:
   static bool is_valid_prompt_object(ObJsonObject* prompt_object);
   static int replace_all_str_args_in_template(ObIAllocator &allocator, ObJsonObject* prompt_object, ObString& replaced_prompt_str);
   static int construct_prompt_object(ObIAllocator &allocator, ObString &template_str, ObJsonArray *args_array, ObJsonObject *&prompt_object);
+  // Render the whole prompt object (template with every placeholder expanded).
+  static int render_prompt_object(ObIAllocator &allocator, ObJsonObject *prompt_object, const int64_t depth, ObString &rendered);
+  // Render one placeholder argument. A nested prompt object is expanded recursively,
+  // any other json value keeps its json text form.
+  static int render_prompt_arg(ObIAllocator &allocator, ObJsonNode *arg_node, const int64_t depth, ObString &rendered);
   static constexpr char prompt_template_key[20] = "template";
   static constexpr char prompt_args_key[20] = "args";
 private:
