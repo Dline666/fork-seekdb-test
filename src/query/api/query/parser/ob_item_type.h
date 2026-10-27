@@ -1557,7 +1557,9 @@ typedef enum ObItemType
   T_FILE_TABLE_EXPRESSION = 3977,
   T_FILE_TABLE_OPTION = 3978,
   T_COPY_STMT = 3979,
-  T_RESERVED_3980 = 3980,
+  // Marks the DESCRIBE keyword so the resolver can turn a describe of a file
+  // table into a schema result instead of an EXPLAIN plan.
+  T_DESCRIBE_STMT = 3980,
   T_RESERVED_3981 = 3981,
   T_RESERVED_3982 = 3982,
   T_RESERVED_3983 = 3983,

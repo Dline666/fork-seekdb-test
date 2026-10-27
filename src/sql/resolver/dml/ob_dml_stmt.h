@@ -95,6 +95,9 @@ enum ObFileTableFormat : int64_t
   OB_FILE_TABLE_NDJSON = 2,
   OB_FILE_TABLE_PARQUET = 3,
   OB_FILE_TABLE_GLOB = 4,
+  // A synthetic static table used by DESCRIBE: it wraps the inner read_*()
+  // expression and returns one row per inferred column.
+  OB_FILE_TABLE_DESCRIBE = 5,
 };
 
 struct ObFileTableColumn

@@ -137,6 +137,117 @@ int ObResolver::select_stmt_resolver_func(ObResolverParams &params, const ParseN
   return ret;
 }
 
+namespace {
+
+// The DESCRIBE rewrite builds a handful of synthetic parse nodes. Allocate them
+// from the statement allocator so their lifetime matches the resolved statement;
+// fields the resolver does not need stay zeroed/NULL.
+ParseNode *make_parse_node(common::ObIAllocator &allocator,
+                           const ObItemType type,
+                           const int64_t num_child)
+{
+  ParseNode *node = NULL;
+  void *buf = allocator.alloc(sizeof(ParseNode));
+  if (OB_NOT_NULL(buf)) {
+    node = static_cast<ParseNode *>(buf);
+    memset(node, 0, sizeof(ParseNode));
+    node->type_ = type;
+    node->num_child_ = static_cast<int32_t>(num_child);
+    node->value_ = INT64_MAX;
+    node->pl_str_off_ = -1;
+    if (num_child > 0) {
+      void *children = allocator.alloc(sizeof(ParseNode *) * num_child);
+      if (OB_ISNULL(children)) {
+        node = NULL;
+      } else {
+        memset(children, 0, sizeof(ParseNode *) * num_child);
+        node->children_ = static_cast<ParseNode **>(children);
+      }
+    }
+  }
+  return node;
+}
+
+void collect_file_table_expressions(ParseNode *node, ParseNode *&first, int64_t &count)
+{
+  if (NULL == node) {
+    return;
+  }
+  if (T_FILE_TABLE_EXPRESSION == node->type_) {
+    if (NULL == first) {
+      first = node;
+    }
+    ++count;
+  }
+  for (int32_t i = 0; i < node->num_child_; ++i) {
+    collect_file_table_expressions(node->children_[i], first, count);
+  }
+}
+
+bool tree_contains(ParseNode *node, const ObItemType type)
+{
+  if (NULL == node) {
+    return false;
+  }
+  if (type == node->type_) {
+    return true;
+  }
+  for (int32_t i = 0; i < node->num_child_; ++i) {
+    if (tree_contains(node->children_[i], type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+} // namespace
+
+int ObResolver::build_describe_select(const ParseNode &parse_tree, ParseNode *&describe_select)
+{
+  int ret = OB_SUCCESS;
+  describe_select = NULL;
+  if (T_EXPLAIN != parse_tree.type_ || 5 != parse_tree.num_child_) {
+    // not a DESCRIBE/EXPLAIN statement
+  } else {
+    ParseNode *marker = parse_tree.children_[0];
+    ParseNode *child = parse_tree.children_[4];
+    ParseNode *project = NULL != child && T_SELECT == child->type_
+                         ? child->children_[PARSE_SELECT_SELECT] : NULL;
+    ParseNode *from = NULL != child && T_SELECT == child->type_
+                      ? child->children_[PARSE_SELECT_FROM] : NULL;
+    // Only "DESCRIBE SELECT ... FROM read_*()" is rewritten; everything else
+    // keeps the regular EXPLAIN behaviour.
+    if (NULL == marker || T_DESCRIBE_STMT != marker->type_
+        || NULL == from || NULL == project || !tree_contains(project, T_STAR)) {
+      // not a describe of a file table result
+    } else {
+      ParseNode *file_expr = NULL;
+      int64_t file_expr_count = 0;
+      collect_file_table_expressions(from, file_expr, file_expr_count);
+      if (1 != file_expr_count) {
+        // a join of several files has no single schema to describe
+      } else {
+        ParseNode *describe_node = make_parse_node(*params_.allocator_,
+                                                   T_FILE_TABLE_EXPRESSION, 3);
+        ParseNode *from_node = make_parse_node(*params_.allocator_, T_FROM_LIST, 1);
+        ParseNode *select_node = make_parse_node(*params_.allocator_,
+                                                 T_SELECT, PARSE_SELECT_MAX_IDX);
+        if (NULL == describe_node || NULL == from_node || NULL == select_node) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          describe_node->value_ = OB_FILE_TABLE_DESCRIBE;
+          describe_node->children_[0] = file_expr;
+          from_node->children_[0] = describe_node;
+          select_node->children_[PARSE_SELECT_SELECT] = project;
+          select_node->children_[PARSE_SELECT_FROM] = from_node;
+          describe_select = select_node;
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObStmt *&stmt)
 {
 #define REGISTER_STMT_RESOLVER(name)                                   \
@@ -146,7 +257,7 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
 
 #define REGISTER_SELECT_STMT_RESOLVER(name)                                   \
   do {                                                                        \
-    ret = select_stmt_resolver_func<Ob##name##Resolver>(params_, parse_tree, stmt); \
+    ret = select_stmt_resolver_func<Ob##name##Resolver>(params_, *real_parse_tree, stmt); \
   } while (0)
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_resolve);
   int ret = OB_SUCCESS;
@@ -164,15 +275,26 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
   }
 
   if (OB_SUCC(ret)) {
-    params_.resolver_scope_stmt_type_ = parse_tree.type_;
+    // A DESCRIBE of a file table reports the inferred schema. Resolve the
+    // synthesized SELECT in place of the EXPLAIN statement so the normal
+    // select plan produces the result set.
+    ParseNode *describe_select = NULL;
+    if (OB_FAIL(build_describe_select(parse_tree, describe_select))) {
+    } else if (NULL != describe_select) {
+      real_parse_tree = describe_select;
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    params_.resolver_scope_stmt_type_ = real_parse_tree->type_;
     params_.session_info_->set_stmt_type(
-      ObResolverUtils::get_stmt_type_by_item_type(parse_tree.type_));
+      ObResolverUtils::get_stmt_type_by_item_type(real_parse_tree->type_));
     ObExecContext *exec_ctx = params_.session_info_->get_cur_exec_ctx();
     if (exec_ctx != nullptr && exec_ctx->get_sql_ctx() != nullptr) {
       //save the current stmt type on my context,
       //some other modules may need to get the current SQL stmt type through its context
       ObSqlCtx *sql_ctx = exec_ctx->get_sql_ctx();
-      sql_ctx->stmt_type_ = ObResolverUtils::get_stmt_type_by_item_type(parse_tree.type_);
+      sql_ctx->stmt_type_ = ObResolverUtils::get_stmt_type_by_item_type(real_parse_tree->type_);
     }
 
     switch (real_parse_tree->type_) {

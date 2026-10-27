@@ -107,6 +107,11 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
             opt.with_tree_line_ = true;
             break;
           }
+          case T_DESCRIBE_STMT: {
+            // DESCRIBE of something that is not a file table keeps the regular
+            // EXPLAIN output; the file table rewrite happens in ObResolver.
+            break;
+          }
           default:
             ret = OB_ERROR;
             LOG_WARN("unknown explain format", "format", format->type_);

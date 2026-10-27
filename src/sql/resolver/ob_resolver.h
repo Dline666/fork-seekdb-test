@@ -47,6 +47,12 @@ private:
 
   template <typename SelectResolverType>
   int select_stmt_resolver_func(ObResolverParams &params, const ParseNode &parse_tree, ObStmt *&stmt);
+
+  // DuckDB style DESCRIBE: "DESCRIBE SELECT * FROM read_*()" reports the
+  // inferred file schema instead of an EXPLAIN plan. Returns a synthesized
+  // SELECT over a static schema table, or leaves describe_select NULL when the
+  // statement is a plain EXPLAIN or the describe target is not a file table.
+  int build_describe_select(const ParseNode &parse_tree, ParseNode *&describe_select);
 private:
   // data members
   ObResolverParams params_;

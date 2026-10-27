@@ -2791,6 +2791,12 @@ int ObDMLResolver::build_file_table_def(const ParseNode &parse_tree,
   void *buf = NULL;
   CK(OB_NOT_NULL(allocator_));
   CK(OB_NOT_NULL(session_info_));
+  if (OB_UNLIKELY(OB_FILE_TABLE_DESCRIBE == format)) {
+    // A describe node has no path literal of its own: it wraps the read_*()
+    // expression it should describe.
+    ret = build_describe_file_table_def(parse_tree, table_def);
+    return ret;
+  }
   if (OB_SUCC(ret)) {
     if (OB_ISNULL(path_node) || !file_sql_resolver::get_text(path_node, path)
         || path.empty()) {
@@ -2914,6 +2920,71 @@ int ObDMLResolver::build_file_table_def(const ParseNode &parse_tree,
   }
   if (OB_SUCC(ret)) {
     table_def = def;
+  }
+  return ret;
+}
+
+// DESCRIBE SELECT * FROM read_*(): report the inferred schema as a static table
+// with the DuckDB column set, so the regular select plan can return it.
+int ObDMLResolver::build_describe_file_table_def(const ParseNode &parse_tree,
+                                                 ObFileTableDef *&table_def)
+{
+  int ret = OB_SUCCESS;
+  table_def = NULL;
+  const ParseNode *inner_node = parse_tree.num_child_ > 0 ? parse_tree.children_[0] : NULL;
+  ObFileTableDef *inner_def = NULL;
+  if (OB_ISNULL(inner_node) || T_FILE_TABLE_EXPRESSION != inner_node->type_) {
+    ret = OB_ERR_PARSER_SYNTAX;
+    LOG_WARN("describe expects a file table expression", K(ret));
+  } else if (OB_FAIL(build_file_table_def(*inner_node, inner_def))) {
+  } else if (OB_ISNULL(inner_def)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    void *buf = allocator_->alloc(sizeof(ObFileTableDef));
+    ObFileTableDef *def = NULL;
+    const char *describe_columns[] = {
+        "column_name", "column_type", "null", "key", "default", "extra"};
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      def = new (buf) ObFileTableDef();
+      def->format_ = OB_FILE_TABLE_DESCRIBE;
+      def->is_static_ = true;
+      def->static_column_count_ = static_cast<int64_t>(ARRAYSIZEOF(describe_columns));
+      def->row_count_ = static_cast<int64_t>(inner_def->columns_.count());
+      for (int64_t i = 0; OB_SUCC(ret) && i < def->static_column_count_; ++i) {
+        ObFileTableColumn column;
+        column.type_ = ObVarcharType;
+        column.accuracy_.set_length(OB_MAX_VARCHAR_LENGTH);
+        column.cs_type_ = CS_TYPE_UTF8MB4_GENERAL_CI;
+        column.nullable_ = false;
+        column.file_type_ = file_sql::FILE_COL_VARCHAR;
+        if (OB_FAIL(ob_write_string(*allocator_, ObString::make_string(describe_columns[i]),
+                                    column.name_))) {
+        } else if (OB_FAIL(def->columns_.push_back(column))) {
+        }
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < inner_def->columns_.count(); ++i) {
+        const ObFileTableColumn &column = inner_def->columns_.at(i);
+        ObString cells[] = {
+            column.name_,
+            ObString::make_string(file_sql::file_column_type_name(
+                static_cast<file_sql::FileColumnType>(column.file_type_))),
+            ObString::make_string(column.nullable_ ? "YES" : "NO"),
+            ObString::make_string("NULL"),
+            ObString::make_string("NULL"),
+            ObString::make_string("NULL")};
+        for (int64_t c = 0; OB_SUCC(ret) && c < def->static_column_count_; ++c) {
+          ObString cell;
+          if (OB_FAIL(ob_write_string(*allocator_, cells[c], cell))) {
+          } else if (OB_FAIL(def->static_cells_.push_back(cell))) {
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        table_def = def;
+      }
+    }
   }
   return ret;
 }

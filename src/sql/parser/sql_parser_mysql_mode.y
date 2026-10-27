@@ -12275,7 +12275,18 @@ explain_or_desc relation_factor opt_desc_column_option
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $2, NULL, $3);
 }
 
-| explain_or_desc explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);}
+| explain_or_desc explainable_stmt
+{
+  // Keep the DESCRIBE keyword distinguishable: the resolver turns
+  // "DESCRIBE SELECT ... FROM read_*()" into an inferred schema result, while
+  // EXPLAIN keeps building a plan.
+  ParseNode *describe_node = NULL;
+  if (NULL != $1 && T_DESCRIBE_STMT == $1->type_) {
+    describe_node = $1;
+  }
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPLAIN, 5,
+                           describe_node, NULL, NULL, NULL, $2);
+}
 | explain_or_desc PRETTY explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY, $3, NULL, NULL);}
 | explain_or_desc PRETTY_COLOR explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY_COLOR, $3, NULL, NULL);}
 
@@ -12316,7 +12327,7 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
+| DESCRIBE {malloc_terminal_node($$, result->malloc_pool_, T_DESCRIBE_STMT);}
 | DESC  {$$ = NULL;}
 ;
 

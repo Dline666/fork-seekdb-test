@@ -210,6 +210,9 @@ public:
   // resolve a read_csv()/read_json()/read_parquet()/glob() table function
   int resolve_file_table_item(const ParseNode &table_node, TableItem *&table_item);
   int build_file_table_def(const ParseNode &parse_tree, ObFileTableDef *&table_def);
+  // DESCRIBE of a file table: wrap the inner read_*() expression and expose the
+  // inferred schema as a static table (column_name/column_type/null/key/default/extra).
+  int build_describe_file_table_def(const ParseNode &parse_tree, ObFileTableDef *&table_def);
   int infer_file_table_schema(ObFileTableDef &table_def);
   int resolve_file_table_column_item(const TableItem &table_item,
                                      const common::ObString &column_name,
