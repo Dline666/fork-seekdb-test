@@ -13,14 +13,14 @@ def canonical(value):
  return value
 for parser in ['beng','ik','space','ngram','ngram2']:
  for i,text in enumerate(texts):
-  cur.execute("select tokenize(%s,%s,json_array(json_object('output','all'))) as tokens",(text,parser));expected[(parser,i)]=canonical(json.loads(cur.fetchone()[0]))
+  cur.execute("select tokenize(convert(%s using utf8mb4),%s,json_array(json_object('output','all'))) as tokens",(text,parser));expected[(parser,i)]=canonical(json.loads(cur.fetchone()[0]))
 def worker(index):
  c=connect();q=c.cursor();q.execute('use '+database);checks=0;offset=index*1000
  try:
   for repeat in range(5):
    for parser in ['beng','ik','space','ngram','ngram2']:
     for i,text in enumerate(texts):
-     q.execute("select tokenize(%s,%s,json_array(json_object('output','all'))) as tokens",(text,parser));actual=canonical(json.loads(q.fetchone()[0]));assert actual==expected[(parser,i)],(index,repeat,parser,i);checks+=1
+     q.execute("select tokenize(convert(%s using utf8mb4),%s,json_array(json_object('output','all'))) as tokens",(text,parser));actual=canonical(json.loads(q.fetchone()[0]));assert actual==expected[(parser,i)],(index,repeat,parser,i);checks+=1
   q.executemany('insert into docs values(%s,%s)',[(offset+i,'database engine performance audit repeated') for i in range(20)])
   for sql in ["select count(*) from docs where id>=%s and id<%s and match(content) against('database performance')", "select count(*) from docs where id>=%s and id<%s and match(content) against('database performance')+0>0"]:
    q.execute(sql,(offset,offset+20));assert q.fetchone()[0]==20;checks+=1
