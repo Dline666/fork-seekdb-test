@@ -1,7 +1,7 @@
 # Native JSON config must be decoded as binary JSON, not parsed as text.
 connection default;
 --disable_query_log
---exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19125
+--exec python3 mysql_test/test_suite/ai_function/include/ai_function_mock.py start 19125
 --error 0,11112
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('json_config_ep');
 --error 0,11118
@@ -26,5 +26,5 @@ select ai_complete('json_config_model', 'hello', 'null');
 --enable_result_log
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('json_config_ep');
 call DBMS_AI_SERVICE.DROP_AI_MODEL('json_config_model');
---exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py stop 19125
+--exec python3 mysql_test/test_suite/ai_function/include/ai_function_mock.py stop 19125
 --enable_query_log
