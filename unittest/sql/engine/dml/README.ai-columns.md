@@ -49,3 +49,18 @@ python3 unittest/sql/engine/expr/run_ai_function_tests.py \
 That ordering keeps the original SQL and timeout settings, so it can expose
 cold-start problems hidden by a warmed test sequence. Local success is evidence
 for covered scenarios; official competition scoring remains separate.
+
+To stress the original worker suite without adapting any timing commands:
+
+```sh
+python3 unittest/sql/engine/dml/run_ai_column_tests.py \
+  --binary "$PWD/build_release/src/observer/seekdb" \
+  --mysqltest /path/to/mysqltest --cases ai_column_worker \
+  --worker-repeats 10 --skip-regressions
+```
+
+Each iteration retains its own client log. The original worker's old-response
+assertion can fail when the original request has not started before an update.
+The dispatch fix wakes workers from transaction completion, drains runnable
+groups without an imposed wait and reuses the fresh group lease before its
+first request. These scheduling hints do not replace durable claim/owner checks.

@@ -23,11 +23,19 @@ def main():
     parser.add_argument('--mysqltest', type=pathlib.Path, default=shutil.which('mysqltest'))
     parser.add_argument('--repo', type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[4])
     parser.add_argument('--output-dir', type=pathlib.Path, default=pathlib.Path.cwd() / 'work/ai-column-validation')
+    parser.add_argument('--cases', nargs='+', choices=CASES, default=CASES)
+    parser.add_argument('--worker-repeats', type=int, default=1,
+                        help='Repeat the original worker suite to expose dispatch races.')
+    parser.add_argument('--skip-regressions', action='store_true')
     parser.add_argument('--precise-fractional-sleeps', action='store_true', help=(
         'Local client compatibility: stage test copies using Python time.sleep for fractional '
         '--real_sleep commands. Some macOS mysqltest builds round waits to wall-clock seconds. '
         'Original test files, SQL, mocks, assertions and expected results are unchanged.'))
     args = parser.parse_args()
+    if args.worker_repeats < 1:
+        parser.error('--worker-repeats must be positive')
+    cases = [case for case in args.cases
+             for _ in range(args.worker_repeats if case == 'ai_column_worker' else 1)]
     if args.mysqltest is None:
         parser.error('mysqltest is required; pass --mysqltest /path/to/mysqltest')
     try:
@@ -85,7 +93,10 @@ def main():
                 cursor.execute('CREATE DATABASE ai_column_public_validation')
             connection.close()
             connection = None
-            for case in CASES:
+            iterations = {}
+            for case in cases:
+                iterations[case] = iterations.get(case, 0) + 1
+                iteration = iterations[case]
                 source = suite / 't' / (case + '.test')
                 test_file = source
                 replacements = 0
@@ -106,9 +117,11 @@ def main():
                     '--logdir=' + str(runtime), '--tmpdir=' + str(runtime)]
                 result = subprocess.run(command, cwd=args.repo / 'tools/deploy', env=env,
                                         capture_output=True, text=True, timeout=240)
-                log = output / ('ai-column-ready-' + case + '.log')
+                suffix = ('-' + str(iteration)) if cases.count(case) > 1 else ''
+                log = output / ('ai-column-ready-' + case + suffix + '.log')
                 log.write_text(result.stdout + result.stderr)
                 summary['public'].append({'name':case, 'returncode':result.returncode, 'log':str(log),
+                    'iteration':iteration,
                     'source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
                     'test_file':str(test_file), 'fractional_sleeps_replaced':replacements})
                 print(case, 'PASS' if result.returncode == 0 else 'FAIL', flush=True)
@@ -121,6 +134,8 @@ def main():
             ('recovery', 'unittest/sql/engine/dml/test_ai_column_recovery.py'),
             ('retry', 'unittest/sql/engine/basic/test_ai_column_retry_sql.py'),
             ('strict', 'unittest/sql/engine/basic/test_ai_column_strict_sql.py')]
+        if args.skip_regressions:
+            regressions = []
         for name, relative in regressions:
             log = output / ('ai-column-ready-' + name + '.log')
             with log.open('w') as stream:
@@ -139,8 +154,8 @@ def main():
         for port in (19120,19121,19122,19123,19124):
             subprocess.run([sys.executable, str(mock), 'stop', str(port)], env=env,
                            capture_output=True, timeout=10, check=False)
-        summary['passed'] = (summary['error'] is None and len(summary['public']) == 5
-            and len(summary['regressions']) == 4 and all(
+        summary['passed'] = (summary['error'] is None and len(summary['public']) == len(cases)
+            and len(summary['regressions']) == (0 if args.skip_regressions else 4) and all(
                 item['returncode'] == 0 for item in summary['public'] + summary['regressions']))
         path = output / 'ai-column-ready-summary.json'
         path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n')
