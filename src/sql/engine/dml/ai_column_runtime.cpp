@@ -112,7 +112,7 @@ int ai_rowkey(ObTableModifyOp &op, const ObDMLBaseCtDef &ctdef, const ObTableSch
       predicate += ai_ident(column->get_column_name_str()) + " = " + value;
     }
   }
-  if (OB_SUCC(ret) && (predicate.empty() || predicate.size() > 4096)) { ret = OB_SIZE_OVERFLOW; }
+  if (OB_SUCC(ret) && (predicate.empty() || predicate.size() > static_cast<size_t>(OB_MAX_VARCHAR_LENGTH))) { ret = OB_SIZE_OVERFLOW; }
   return ret;
 }
 int ai_dependency_changed(ObTableModifyOp &op, const ObDMLBaseCtDef &ctdef,

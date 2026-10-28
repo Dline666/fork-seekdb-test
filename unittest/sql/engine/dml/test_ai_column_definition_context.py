@@ -294,6 +294,16 @@ def main():
             finally:
                 query('set session ai_column_strict_read=off')
         check('NULL embedding result reaches READY without an HTTP request', null_embedding_ready)
+        def wide_primary_key():
+            query("create table wide_primary_docs(k1 varchar(350), k2 varchar(350), content varchar(100), "
+                  "result varchar(400) AI COLUMN(AI_COMPLETE('review_model',content)) "
+                  "WITH(sync_mode='async',max_retries=0), primary key(k1,k2))")
+            keys = ('界' * 350, '字' * 350)
+            query('insert into wide_primary_docs(k1,k2,content) values(%s,%s,%s)', (*keys,'wide-key'))
+            result('wide_primary_docs', 'mock:wide-key')
+            query('update wide_primary_docs set content=%s where k1=%s and k2=%s', ('wide-update',*keys))
+            result('wide_primary_docs', 'mock:wide-update')
+        check('valid wide Unicode primary key survives persistent predicate serialization', wide_primary_key)
         print('RUNTIME', runtime, flush=True)
         print('SUMMARY', {'passed': passed, 'failed': failed}, flush=True)
     finally:

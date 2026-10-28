@@ -867,7 +867,7 @@ def_table_schema(
   rowkey_columns = [('task_id', 'varchar:128')],
   normal_columns = [
     ('table_id', 'int'), ('column_id', 'int'),
-    ('rowkey_predicate', 'varchar:4096'), ('request_id', 'varchar:64'),
+    ('rowkey_predicate', 'varchar:OB_MAX_VARCHAR_LENGTH'), ('request_id', 'varchar:64'),
     ('definition_version', 'int'), ('eligible_ts', 'timestamp'),
     ('retry_count', 'int'), ('max_retries', 'int'), ('state', 'int'),
     ('owner_id', 'varchar:128', 'true'), ('lease_until', 'timestamp', 'true'),
