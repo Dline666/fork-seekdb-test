@@ -74,9 +74,11 @@ int ObTextTaaTIter::pre_process()
       partition_cnt_ = MIN((total_doc_cnt-1) / OB_HASHMAP_DEFAULT_SIZE + 1, OB_MAX_HASHMAP_COUNT);
     }
   } else {
-    // The ID-only hash set does not depend on corpus statistics. A single
-    // partition is sufficient and avoids a document-count scan.
-    partition_cnt_ = 1;
+    // Without corpus statistics, retain the maximum partitioning used by the
+    // scored path. Putting every matching ID in one hash map would increase
+    // its peak memory up to twentyfold for large posting lists. Partitioned
+    // spill stores still consume each posting once, without a count scan.
+    partition_cnt_ = OB_MAX_HASHMAP_COUNT;
   }
   return ret;
 }
