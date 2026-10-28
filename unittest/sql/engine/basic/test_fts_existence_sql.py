@@ -82,14 +82,16 @@ def main():
             ((20,),)))
 
         def scored_plan(sql):
-            # Small fixtures may legitimately choose functional lookup on a
-            # full table scan. Force the inverted index here so this assertion
-            # exercises the score-producing retrieval path explicitly.
+            # A small fixture can use functional lookup even with an INDEX
+            # hint. Both it and scored retrieval are native score producers;
+            # neither may be replaced by the ID-only existence path.
             indexed = sql.replace('select ', 'select /*+ index(docs ft) */ ', 1)
             plan = explain(indexed)
-            if 'calc_relevance=true' not in plan:
+            if ('calc_relevance=false' in plan or not (
+                    'calc_relevance=true' in plan or 'has_functional_lookup=true' in plan)):
                 raise AssertionError(plan)
-            query(indexed)
+            fallback = sql.replace('select ', 'select /*+ no_index(docs ft) */ ', 1)
+            equal(query(indexed), query(fallback))
         for name, sql in [
             ('projected score', "select id,match(content) against('database') score from docs where match(content) against('database')>0 order by id"),
             ('projected boolean shared expression', "select id,match(content) against('database')>0 present from docs where match(content) against('database')>0 order by id"),
