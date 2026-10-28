@@ -1,0 +1,20 @@
+# Preserve BENG case, frequency, control separators, and index/DML semantics.
+connection default;
+--disable_query_log
+select json_contains(tokenize('Hello WORLD','beng'), '["hello","world"]') as lowercase_tokens;
+select json_length(tokenize('a b c','beng')) as short_tokens;
+select json_contains(tokenize('Database Database database PERFORMANCE! audit-log 2026','beng',json_array(json_object('output','all'))), '{"tokens":[{"database":3}],"doc_len":7}') as frequency_preserved;
+select json_contains(tokenize(convert(concat('ABC',char(0),'DEF') using utf8mb4),'beng'), '["abc","def"]') as control_boundary;
+select json_contains(tokenize('中文 English 混合检索 OceanBase seekdb 内核 123!','beng'), '["english","oceanbase","中文"]') as mixed_utf8_tokens;
+select json_contains(tokenize('cafe café','beng',json_array(json_object('output','all'))), '{"tokens":[{"café":2}],"doc_len":2}') as equivalent_key_preserved;
+create table beng_fastpath_docs(id int primary key, content text, fulltext index fti(content) with parser beng);
+insert into beng_fastpath_docs values(1,'Database engine'),(2,'vector search'),(3,'DATABASE index');
+select count(*) as matching_documents from beng_fastpath_docs where match(content) against('database');
+start transaction;
+update beng_fastpath_docs set content='other content' where id=1;
+rollback;
+select count(*) as matching_after_rollback from beng_fastpath_docs where match(content) against('database');
+delete from beng_fastpath_docs where id=3;
+select count(*) as matching_after_delete from beng_fastpath_docs where match(content) against('database');
+drop table beng_fastpath_docs;
+--enable_query_log
