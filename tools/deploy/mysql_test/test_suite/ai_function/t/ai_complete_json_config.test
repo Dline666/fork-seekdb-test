@@ -1,0 +1,30 @@
+# Native JSON config must be decoded as binary JSON, not parsed as text.
+connection default;
+--disable_query_log
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19125
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('json_config_ep');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('json_config_model');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('json_config_model',
+  '{"type":"completion","model_name":"mock-complete"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('json_config_ep',
+  '{"ai_model_name":"json_config_model","url":"http://127.0.0.1:19125/v1/chat/completions","access_key":"test-key","provider":"openai","request_model_name":"mock-complete"}');
+select length(ai_complete('json_config_model', 'hello', json_object('temperature',0.2,'max_tokens',16))) > 0 as native_json_config_ok;
+select length(ai_complete('json_config_model', 'hello', '{"temperature":0.2,"max_tokens":16}')) > 0 as text_config_ok;
+select length(ai_complete('json_config_model', 'hello', NULL)) > 0 as null_config_ok;
+select length(ai_complete('json_config_model', ai_prompt('describe {0}', json_object('k',1)), json_object('temperature',0.2))) > 0 as prompt_json_config_ok;
+--disable_result_log
+--error 1210
+select ai_complete('json_config_model', 'hello', json_array(1));
+--error 1210
+select ai_complete('json_config_model', 'hello', '[]');
+--error 1210
+select ai_complete('json_config_model', 'hello', 'true');
+--error 1210
+select ai_complete('json_config_model', 'hello', 'null');
+--enable_result_log
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('json_config_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('json_config_model');
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py stop 19125
+--enable_query_log

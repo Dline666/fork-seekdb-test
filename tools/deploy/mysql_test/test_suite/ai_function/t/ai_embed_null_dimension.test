@@ -1,0 +1,11 @@
+# NULL dimensions propagate before model lookup or HTTP requests.
+connection default;
+--disable_query_log
+select ai_embed('unregistered_model', 'content', NULL) is null as literal_null_dimension;
+select ai_embed('unregistered_model', 'content', cast(NULL as signed)) is null as typed_null_dimension;
+create table ai_embed_null_dimension (id int primary key, dimension int);
+insert into ai_embed_null_dimension values (1,NULL),(2,NULL);
+select id, ai_embed('unregistered_model', 'content', dimension) is null as nullable_dimension
+from ai_embed_null_dimension order by id;
+drop table ai_embed_null_dimension;
+--enable_query_log

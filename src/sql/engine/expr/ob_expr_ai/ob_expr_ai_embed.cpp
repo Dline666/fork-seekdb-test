@@ -58,7 +58,10 @@ int ObExprAIEmbed::calc_result_typeN(ObExprResType &type,
     types_stack[CONTENT_IDX].set_calc_type(ObVarcharType);
     types_stack[CONTENT_IDX].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
     if (param_num == 3) {
-      if (ob_is_integer_type(types_stack[DIM_IDX].get_type())) {
+      if (ob_is_integer_type(types_stack[DIM_IDX].get_type())
+          || ObNullType == types_stack[DIM_IDX].get_type()) {
+        // A literal NULL must reach the same NULL propagation path as a
+        // nullable integer column in scalar and batch execution.
         types_stack[DIM_IDX].set_calc_type(ObIntType);
         types_stack[DIM_IDX].set_precision(10);
         types_stack[DIM_IDX].set_scale(0);

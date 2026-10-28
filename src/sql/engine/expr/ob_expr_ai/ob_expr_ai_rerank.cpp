@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_expr_ai_rerank.h"
+#include <cmath>
 #include "query/ai/ob_ai_endpoint_resolver.h"
 #include "share/rc/ob_server_runtime.h"
 #include "lib/utility/utility.h"
@@ -286,17 +287,12 @@ static int json_score_to_double(ObJsonNode *node, double &score)
   int ret = OB_SUCCESS;
   if (OB_ISNULL(node)) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (node->json_type() == ObJsonNodeType::J_DOUBLE) {
-    score = static_cast<ObJsonDouble *>(node)->value();
-  } else if (node->json_type() == ObJsonNodeType::J_INT) {
-    score = static_cast<double>(static_cast<ObJsonInt *>(node)->value());
-  } else if (node->json_type() == ObJsonNodeType::J_UINT) {
-    score = static_cast<double>(static_cast<ObJsonUint *>(node)->value());
-  } else if (node->json_type() == ObJsonNodeType::J_DECIMAL) {
-    char buf[256] = {0};
-    static_cast<ObJsonDecimal *>(node)->value().to_string(buf, sizeof(buf));
-    score = atof(buf);
-  } else {
+  } else if (!ObAIFuncJsonUtils::is_json_number(*node)) {
+    ret = OB_INVALID_DATA;
+  } else if (OB_FAIL(node->to_double(score))) {
+    ret = OB_INVALID_DATA;
+  }
+  if (OB_SUCC(ret) && !std::isfinite(score)) {
     ret = OB_INVALID_DATA;
   }
   return ret;

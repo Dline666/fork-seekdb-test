@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_ai_func_utils.h"
+#include <cmath>
 #include "ob_ai_func_client.h"
 #include "query/engine/expr/ob_ai_model_resolver.h"
 
@@ -1080,7 +1081,9 @@ int ObAIFuncJsonUtils::print_json_to_str(ObIAllocator &allocator, ObIJsonBase *b
 {
   int ret = OB_SUCCESS;
   ObJsonBuffer j_buf(&allocator);
-  if (OB_FAIL(base_node->print(j_buf, 0))) {
+  if (OB_ISNULL(base_node)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(base_node->print(j_buf, 0))) {
   } else {
     str = j_buf.string();
   }
@@ -1091,7 +1094,10 @@ int ObAIFuncJsonUtils::get_json_object_form_str(ObIAllocator &allocator, ObStrin
 {
   int ret = OB_SUCCESS;
   ObIJsonBase *j_base = NULL;
+  obj_node = nullptr;
   if (OB_FAIL(ObJsonBaseFactory::get_json_base(&allocator, str, ObJsonInType::JSON_TREE, ObJsonInType::JSON_TREE, j_base))) {
+  } else if (OB_ISNULL(j_base) || j_base->json_type() != ObJsonNodeType::J_OBJECT) {
+    ret = OB_INVALID_ARGUMENT;
   } else {
     obj_node = static_cast<ObJsonObject *>(j_base);
   }
@@ -1140,8 +1146,13 @@ int ObAIFuncUtils::check_embedding_vector(const ObIJsonBase &vector_node, int64_
   } else {
     for (uint64_t i = 0; OB_SUCC(ret) && i < count; i++) {
       ObIJsonBase *element = nullptr;
+      double value = 0;
       if (OB_FAIL(vector_node.get_array_element(i, element))) {
       } else if (OB_ISNULL(element) || !ObAIFuncJsonUtils::is_json_number(*element)) {
+        ret = OB_INVALID_DATA;
+      } else if (OB_FAIL(element->to_double(value))) {
+        ret = OB_INVALID_DATA;
+      } else if (!std::isfinite(value)) {
         ret = OB_INVALID_DATA;
       }
     }
