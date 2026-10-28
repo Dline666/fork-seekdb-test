@@ -376,11 +376,21 @@ struct ObDatumStrCmpImpl
   static int OB_INLINE cmp(const ObDatum &l, const ObDatum &r, int &cmp_ret,
                            const ObCollationType cs, const bool with_end_space)
   {
-    // Equal byte strings compare equal under every supported collation and
-    // padding mode. Posting-list sorts compare the same token many times;
-    // avoid repeatedly decoding it before comparing the document-id suffix.
-    if (l.len_ == r.len_ && (l.len_ == 0 || l.ptr_ == r.ptr_
+    // The binary collation ignores padding mode and orders raw bytes, exactly
+    // as ob_strnncollsp_binary does. Document IDs use it on every merge-heap
+    // comparison; avoid generic charset lookup/validation in this typed path.
+    if (cs == CS_TYPE_BINARY) {
+      const int64_t length = MIN(l.len_, r.len_);
+      int result = length == 0 || l.ptr_ == r.ptr_ ? 0 : MEMCMP(l.ptr_, r.ptr_, length);
+      if (result == 0) {
+        result = l.len_ == r.len_ ? 0 : (l.len_ < r.len_ ? -1 : 1);
+      }
+      cmp_ret = result > 0 ? 1 : (result < 0 ? -1 : 0);
+    } else if (l.len_ == r.len_ && (l.len_ == 0 || l.ptr_ == r.ptr_
         || 0 == MEMCMP(l.ptr_, r.ptr_, l.len_))) {
+      // Equal byte strings compare equal under every supported collation and
+      // padding mode. Posting-list sorts compare the same token many times;
+      // avoid repeatedly decoding it before comparing the document-id suffix.
       cmp_ret = 0;
     } else {
       cmp_ret = ObCharset::strcmpsp(cs, l.ptr_, l.len_, r.ptr_, r.len_, with_end_space);

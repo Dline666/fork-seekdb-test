@@ -33,6 +33,20 @@ try:
    # CHAR padding/empty comparisons exercise both stored and expression paths.
    capture(collation+'char','select id from cmp_values order by cast(v as char(20)),id')
    capture(collation+'comparisons','select a.id,b.id,strcmp(a.v,b.v),a.v=b.v,a.v<=>b.v,a.v<b.v from cmp_values a join cmp_values b on a.id<39 and b.id<39 order by a.id,b.id')
+ query('create table binary_values(id int primary key,v varbinary(300))')
+ binary_values=[None,b'',b'\0',b'\xff',b'\x7f',b'\x80',b' ',b'  ',b'\0 ',b'\0\0',b'a',b'a ',b'a\0',b'a\xff',bytes(range(256)),b'\0'*256,b'\xff'*256]
+ binary_values += [bytes([i]) for i in range(256)]
+ binary_values += [bytes(rng.randrange(256) for _ in range(rng.randrange(1,100))) for _ in range(128)]
+ cur.executemany('insert into binary_values values(%s,%s)',enumerate(binary_values*2))
+ query('create index binary_idx on binary_values(v)')
+ for hint in ['', '/*+ no_index(binary_values binary_idx) */ ', '/*+ index(binary_values binary_idx) */ ']:
+  for direction in ['asc','desc']:
+   capture('raw binary '+hint+direction,'select '+hint+'id,hex(v) from binary_values order by v '+direction+',id')
+   capture('raw binary top '+hint+direction,'select '+hint+'id,hex(v) from binary_values order by v '+direction+',id limit 51 offset 11')
+ capture('raw binary groups','select min(id),count(*) from binary_values group by v order by min(id)')
+ capture('raw binary window','select id,dense_rank() over(order by v),rank() over(order by v) from binary_values order by id')
+ capture('raw binary joins','select a.id,count(b.id) from binary_values a left join binary_values b on a.v<=>b.v group by a.id order by a.id')
+ capture('raw binary comparisons','select a.id,b.id,strcmp(a.v,b.v),a.v=b.v,a.v<=>b.v,a.v<b.v from binary_values a join binary_values b on a.id<40 and b.id<40 order by a.id,b.id')
  record={'checks':len(outputs),'outputs':outputs};a.output.write_text(json.dumps(record,ensure_ascii=False,indent=2)+'\n')
  if a.compare:
   before=json.loads(a.compare.read_text());actual=json.loads(a.output.read_text());differences=[k for k,v in actual['outputs'].items() if before['outputs'].get(k)!=v]
