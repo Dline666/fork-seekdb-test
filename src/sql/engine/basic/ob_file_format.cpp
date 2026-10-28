@@ -26,6 +26,7 @@
 #include "sql/engine/basic/ob_parquet_format.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -54,6 +55,16 @@ namespace
 // ---------------------------------------------------------------------------
 // Small utilities
 // ---------------------------------------------------------------------------
+
+bool fsql_check_identity(const std::string &path, const FileIdentity &expected, std::string &err)
+{
+  FileIdentity current;
+  if (read_file_identity(path, current) != 0 || current != expected) {
+    err = "file changed during schema inference or scan: " + path;
+    return false;
+  }
+  return true;
+}
 
 const int64_t FSQL_STREAM_BUFFER_SIZE = 64 * 1024;
 
@@ -787,7 +798,8 @@ public:
         if (!parse_quoted_field(field.text, err)) {
           return -1;
         }
-        // Anything between the closing quote and the delimiter is ignored.
+        // Whitespace after a closing quote is tolerated, but silently discarding
+        // arbitrary bytes would accept malformed input and lose field data.
         for (;;) {
           const int look = stream_->peek();
           if (look < 0 || look == delimiter_ch || look == '\n') {
@@ -800,6 +812,10 @@ public:
             }
             end_of_record = true;
             break;
+          }
+          if (look != ' ' && look != '\t') {
+            err = "unexpected data after closing quote at line " + std::to_string(record_line_);
+            return -1;
           }
           stream_->next();
         }
@@ -858,21 +874,19 @@ private:
       if (escape_ch != quote_ch && c == escape_ch) {
         const int escaped = stream_->next();
         if (escaped < 0) {
-          text.push_back(escape_);
-          return true;
+          err = "unterminated escape in quoted field starting at line " + std::to_string(record_line_);
+          return false;
         }
         text.push_back(static_cast<char>(escaped));
         continue;
       }
       if (c == '\r') {
-        // Inside quotes the newline is literal data; CRLF is normalized to LF so
-        // that the same record read from a CRLF and a LF file compares equal.
-        const int look = stream_->peek();
-        if (look == '\n') {
+        // Inside quotes CRLF is field data, not a record separator. Preserve
+        // both bytes so COPY/read_csv round trips do not alter text contents.
+        text.push_back('\r');
+        if (stream_->peek() == '\n') {
           stream_->next();
           text.push_back('\n');
-        } else {
-          text.push_back('\r');
         }
         continue;
       }
@@ -1712,14 +1726,8 @@ private:
       cursor_.skip_ws();
       c = cursor_.peek();
       if (c == ']') {
-        cursor_.get();
-        finished_ = true;
-        cursor_.skip_ws();
-        if (cursor_.peek() >= 0) {
-          err = fsql_json_line_prefix(cursor_) + "unexpected data after the JSON array";
-          return -1;
-        }
-        return 0;
+        err = fsql_json_line_prefix(cursor_) + "trailing comma in the JSON array";
+        return -1;
       }
       if (c < 0) {
         err = fsql_json_line_prefix(cursor_) + "unexpected end of file inside the JSON array";
@@ -1809,7 +1817,7 @@ int fsql_apply_projection(const std::vector<FileColumn> &all,
 class FsqlCsvReader : public FileBatchReader
 {
 public:
-  FsqlCsvReader() : eof_(false), opened_(false) {}
+  FsqlCsvReader() : source_column_count_(0), eof_(false), opened_(false) {}
   ~FsqlCsvReader() override {}
 
   int open(const std::string &path, const FileScanOptions &options, std::string &err) override
@@ -1824,12 +1832,17 @@ public:
       err = std::string("read_csv: ") + err;
       return FAILED;
     }
+    source_column_count_ = all_columns.size();
     if (fsql_apply_projection(all_columns, options.projection, columns_, source_indexes_, err) != 0) {
       err = std::string("read_csv: ") + err;
       return FAILED;
     }
     if (stream_.open(path) != 0) {
       err = "cannot open file for reading: " + path;
+      return FAILED;
+    }
+    path_ = path;
+    if (!fsql_check_identity(path_, identity_, err)) {
       return FAILED;
     }
     parser_.open(stream_, options_);
@@ -1858,6 +1871,9 @@ public:
       err = "read_csv: reader is not open";
       return FAILED;
     }
+    if (!fsql_check_identity(path_, identity_, err)) {
+      return FAILED;
+    }
     if (eof_) {
       return EOF_REACHED;
     }
@@ -1877,6 +1893,10 @@ public:
         eof_ = true;
         break;
       }
+      if (record.size() != source_column_count_) {
+        err = "read_csv: column count differs from the inferred schema";
+        return FAILED;
+      }
       row.clear();
       row.resize(columns_.size());
       for (size_t i = 0; i < columns_.size(); ++i) {
@@ -1891,6 +1911,9 @@ public:
       rows.push_back(std::move(row));
       ++produced;
     }
+    if (!fsql_check_identity(path_, identity_, err)) {
+      return FAILED;
+    }
     if (produced == 0) {
       return eof_ ? EOF_REACHED : SUCCESS;
     }
@@ -1903,6 +1926,8 @@ private:
   FileScanOptions options_;
   FsqlFileStream stream_;
   FsqlCsvParser parser_;
+  std::string path_;
+  size_t source_column_count_;
   std::vector<FileColumn> columns_;
   std::vector<int32_t> source_indexes_;
   FileIdentity identity_;
@@ -1941,6 +1966,10 @@ public:
       err = std::string("read_json: ") + err;
       return FAILED;
     }
+    path_ = path;
+    if (!fsql_check_identity(path_, identity_, err)) {
+      return FAILED;
+    }
     opened_ = true;
     return SUCCESS;
   }
@@ -1952,6 +1981,9 @@ public:
     err.clear();
     if (!opened_) {
       err = "read_json: reader is not open";
+      return FAILED;
+    }
+    if (!fsql_check_identity(path_, identity_, err)) {
       return FAILED;
     }
     if (eof_) {
@@ -1989,6 +2021,9 @@ public:
       rows.push_back(std::move(row));
       ++produced;
     }
+    if (!fsql_check_identity(path_, identity_, err)) {
+      return FAILED;
+    }
     if (produced == 0) {
       return eof_ ? EOF_REACHED : SUCCESS;
     }
@@ -2000,6 +2035,7 @@ public:
 private:
   FileScanOptions options_;
   FsqlJsonRowStream rows_;
+  std::string path_;
   FsqlJsonObject object_;
   std::vector<FileColumn> all_columns_;
   std::vector<FileColumn> columns_;
@@ -2113,12 +2149,24 @@ public:
       return -1;
     }
     final_path_ = path;
-    temp_path_ = path + ".tmp";
-    fp_ = std::fopen(temp_path_.c_str(), "wb");
+    // Exclusive creation must not truncate another export or follow a planted
+    // symlink. The timestamp reduces cross-process collisions; the sequence
+    // separates concurrent writers. The filesystem is authoritative on races.
+    static std::atomic<uint64_t> sequence{0};
+    for (int attempt = 0; attempt < 128 && fp_ == nullptr; ++attempt) {
+      const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+      temp_path_ = path + ".tmp." + std::to_string(stamp) + "." +
+                   std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
+      fp_ = std::fopen(temp_path_.c_str(), "wbx");
+      if (fp_ == nullptr && errno != EEXIST) {
+        break;
+      }
+    }
     if (fp_ == nullptr) {
+      // No file was created by us: abort must not remove this candidate path.
       temp_path_.clear();
       final_path_.clear();
-      err = "cannot create temporary output file: " + path + ".tmp";
+      err = "cannot exclusively create temporary output file for: " + path;
       return -1;
     }
     opened_ = true;
@@ -2183,15 +2231,18 @@ public:
       return -1;
     }
     std::error_code ec;
-    std::filesystem::rename(
+    // POSIX rename replaces an existing destination even if open observed none.
+    // A same-directory hard link publishes atomically without replacing any
+    // destination entry. Fail closed if the filesystem cannot create hard links.
+    std::filesystem::create_hard_link(
         std::filesystem::path(temp_path_), std::filesystem::path(final_path_), ec);
     if (ec) {
-      err = "failed to rename " + temp_path_ + " to " + final_path_ + ": " + ec.message();
+      err = "failed to publish " + temp_path_ + " to " + final_path_ + ": " + ec.message();
       remove_temp_file();
       final_path_.clear();
       return -1;
     }
-    temp_path_.clear();
+    remove_temp_file();
     final_path_.clear();
     return 0;
   }
@@ -2230,6 +2281,84 @@ private:
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+bool validate_file_path(const std::string &path,
+                        const std::string &secure_directory,
+                        bool glob,
+                        std::string &resolved_path,
+                        std::string &err)
+{
+  namespace fs = std::filesystem;
+  resolved_path.clear();
+  err.clear();
+  if (path.empty() || secure_directory.empty() || fsql_ascii_iequal_literal(secure_directory, "null") ||
+      path.find('\0') != std::string::npos || secure_directory.find('\0') != std::string::npos) {
+    err = "empty or NUL-containing file path or secure directory";
+    return false;
+  }
+  std::error_code ec;
+  const fs::path root = fs::canonical(fs::path(secure_directory), ec);
+  if (ec || !fs::is_directory(root, ec) || ec) {
+    err = "secure_file_priv must name an existing directory";
+    return false;
+  }
+  fs::path fixed;
+  fs::path suffix;
+  bool wildcard_seen = false;
+  for (const auto &part : fs::path(path)) {
+    const std::string component = part.string();
+    if (glob && component.find_first_of("*?") != std::string::npos) {
+      wildcard_seen = true;
+    }
+    if (wildcard_seen) {
+      if (component == "..") {
+        err = "parent traversal after a glob wildcard is not allowed";
+        return false;
+      }
+      suffix /= part;
+    } else {
+      fixed /= part;
+    }
+  }
+  if (fixed.empty()) fixed = ".";
+  const fs::path canonical = fs::canonical(fixed, ec);
+  if (ec) {
+    err = "cannot resolve the input path: " + path;
+    return false;
+  }
+  // Compare components, not a textual prefix ("allowed-other" is not inside
+  // "allowed"). Windows path components are case insensitive.
+  auto r = root.begin();
+  auto p = canonical.begin();
+  for (; r != root.end(); ++r, ++p) {
+    if (p == canonical.end()) {
+      err = "file path is outside secure_file_priv";
+      return false;
+    }
+#ifdef _WIN32
+    if (!fsql_ascii_iequal_str(r->string(), p->string())) {
+#else
+    if (*r != *p) {
+#endif
+      err = "file path is outside secure_file_priv";
+      return false;
+    }
+  }
+  if (wildcard_seen) {
+    if (!fs::is_directory(canonical, ec) || ec) {
+      err = "glob prefix is not a directory";
+      return false;
+    }
+    resolved_path = (canonical / suffix).string();
+  } else {
+    if (!fs::is_regular_file(canonical, ec) || ec) {
+      err = "input path is not a regular file";
+      return false;
+    }
+    resolved_path = canonical.string();
+  }
+  return true;
+}
 
 const char *file_column_type_name(FileColumnType type)
 {
@@ -2371,6 +2500,12 @@ int infer_csv_schema(const std::string &path,
       }
     }
     ++data_rows;
+    if (record.size() != column_count) {
+      err = path + ": CSV record " + std::to_string(data_rows) +
+            " has " + std::to_string(record.size()) + " columns; expected " +
+            std::to_string(column_count);
+      return -1;
+    }
     for (size_t i = 0; i < column_count; ++i) {
       if (i >= record.size()) {
         null_seen[i] = 1;
@@ -2396,7 +2531,7 @@ int infer_csv_schema(const std::string &path,
     columns[i].type = fsql_mask_to_column_type(masks[i]);
     columns[i].nullable = null_seen[i] != 0;
   }
-  return 0;
+  return fsql_check_identity(path, identity, err) ? 0 : -1;
 }
 
 int infer_json_schema(const std::string &path,
@@ -2471,7 +2606,7 @@ int infer_json_schema(const std::string &path,
     columns[i].type = fsql_json_mask_to_column_type(masks[i]);
     columns[i].nullable = null_seen[i] != 0 || appearances[i] < row_count;
   }
-  return 0;
+  return fsql_check_identity(path, identity, err) ? 0 : -1;
 }
 
 FileBatchReader *create_file_reader(int32_t format)

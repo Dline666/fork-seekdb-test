@@ -119,6 +119,11 @@ int ObFileTableOp::init_reader()
     if (0 != reader_->open(path, options, err)) {
       ret = OB_IO_ERROR;
       LOG_ERROR("failed to open file", K(ret), K(path.c_str()), K(err.c_str()));
+    } else if (reader_->identity() != identity) {
+      // open() may perform another schema pass. Do not use its rows with the
+      // stale types and column indexes captured by the physical plan.
+      ret = OB_IO_ERROR;
+      LOG_WARN("the file changed while the reader was opening", K(ret), K(path.c_str()));
     }
   }
   return ret;

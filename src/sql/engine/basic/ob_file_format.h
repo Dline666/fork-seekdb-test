@@ -123,6 +123,15 @@ public:
   virtual FileIdentity identity() const = 0;
 };
 
+// Canonicalizes an input (or the fixed directory prefix of a glob) and checks
+// confinement to an existing secure directory. Rejects NULs, traversal after a
+// wildcard and symlink escapes. No server-wide allowlist bypass is applied.
+bool validate_file_path(const std::string &path,
+                        const std::string &secure_directory,
+                        bool glob,
+                        std::string &resolved_path,
+                        std::string &err);
+
 // Detects the format from the file extension.  Returns false for unsupported
 // extensions.
 bool detect_format_by_extension(const std::string &path, int32_t &format);

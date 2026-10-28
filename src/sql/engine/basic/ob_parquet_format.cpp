@@ -2645,6 +2645,11 @@ public:
     close_file();
     path_ = path;
     options_ = options;
+    FileIdentity before;
+    if (read_file_identity(path, before) != 0) {
+      err = "parquet: cannot read the file identity: " + path;
+      return FAILED;
+    }
     if (file_.open(path, err) != 0) {
       return FAILED;
     }
@@ -2659,6 +2664,11 @@ public:
     FileIdentity identity;
     if (read_file_identity(path, identity) != 0) {
       err = "parquet: cannot read the identity of file '" + path + "'";
+      close_file();
+      return FAILED;
+    }
+    if (identity != before) {
+      err = "parquet: file changed while reading its schema: " + path;
       close_file();
       return FAILED;
     }
@@ -2677,6 +2687,10 @@ public:
                  std::vector<std::vector<Cell>> &rows,
                  std::string &err) override
   {
+    err.clear();
+    if (!check_identity(err)) {
+      return FAILED;
+    }
     if (max_rows <= 0) {
       return SUCCESS;
     }
@@ -2741,6 +2755,9 @@ public:
       row_group_ready_ = false;
       states_.clear();
     }
+    if (!check_identity(err)) {
+      return FAILED;
+    }
     if (rows.size() == start_size) {
       return EOF_REACHED;
     }
@@ -2748,6 +2765,16 @@ public:
   }
 
 private:
+  bool check_identity(std::string &err) const
+  {
+    FileIdentity current;
+    if (read_file_identity(path_, current) != 0 || current != identity_) {
+      err = "parquet: file changed during scan: " + path_;
+      return false;
+    }
+    return true;
+  }
+
   void close_file()
   {
     file_.close();
@@ -3127,6 +3154,11 @@ int infer_parquet_schema(const std::string &path,
   err.clear();
   columns.clear();
   identity = FileIdentity();
+  FileIdentity before;
+  if (read_file_identity(path, before) != 0) {
+    err = "parquet: cannot read the file identity: " + path;
+    return -1;
+  }
   PqFileReader file;
   if (file.open(path, err) != 0) {
     return -1;
@@ -3141,6 +3173,10 @@ int infer_parquet_schema(const std::string &path,
   FileIdentity file_identity;
   if (read_file_identity(path, file_identity) != 0) {
     err = "parquet: cannot read the identity of file '" + path + "'";
+    return -1;
+  }
+  if (file_identity != before) {
+    err = "parquet: file changed during schema inference: " + path;
     return -1;
   }
   identity = file_identity;

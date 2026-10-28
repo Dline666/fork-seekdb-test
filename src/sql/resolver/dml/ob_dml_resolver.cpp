@@ -2744,29 +2744,24 @@ int option_string(const ParseNode *value, ObString &result)
   return ret;
 }
 
-// secure_file_priv stores a native path; on Windows the configuration value is
-// normalised to backslashes, so a forward slash path is retried in native form.
-int check_secure_path_for_file(const ObString &secure_file_priv, const ObString &path)
+// File SQL must validate the canonical input itself; the legacy secure-path
+// helper expects pre-canonicalized paths and also has a server allowlist.
+int check_secure_path_for_file(const ObString &secure_file_priv, const ObString &path,
+                               const bool glob, ObIAllocator &allocator, ObString &resolved)
 {
-  int ret = ObResolverUtils::check_secure_path(secure_file_priv, path);
-#ifdef _WIN32
-  if (OB_ERR_NO_PRIVILEGE == ret && path.length() > 0 && path.length() < 4096) {
-    char buf[4096];
-    MEMCPY(buf, path.ptr(), path.length());
-    buf[path.length()] = '\0';
-    bool converted = false;
-    for (int64_t i = 0; i < path.length(); ++i) {
-      if ('/' == buf[i]) {
-        buf[i] = '\\';
-        converted = true;
-      }
-    }
-    if (converted) {
-      ObString native_path(static_cast<int32_t>(path.length()), buf);
-      ret = ObResolverUtils::check_secure_path(secure_file_priv, native_path);
-    }
+  int ret = OB_SUCCESS;
+  std::string canonical;
+  std::string err;
+  if (!file_sql::validate_file_path(std::string(path.ptr(), path.length()),
+                                    secure_file_priv.empty() ? std::string() :
+                                        std::string(secure_file_priv.ptr(), secure_file_priv.length()),
+                                    glob, canonical, err)) {
+    ret = OB_ERR_NO_PRIVILEGE;
+    LOG_WARN("file SQL path rejected", K(ret), K(err.c_str()));
+  } else {
+    const ObString canonical_str(static_cast<int32_t>(canonical.size()), canonical.data());
+    ret = ob_write_string(allocator, canonical_str, resolved);
   }
-#endif
   return ret;
 }
 
@@ -2912,7 +2907,9 @@ int ObDMLResolver::build_file_table_def(const ParseNode &parse_tree,
     if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
       LOG_WARN("failed to get secure_file_priv", K(ret));
     } else if (OB_FAIL(file_sql_resolver::check_secure_path_for_file(secure_file_priv,
-                                                                    def->path_))) {
+                                                                    def->path_,
+                                                                    OB_FILE_TABLE_GLOB == format,
+                                                                    *allocator_, def->path_))) {
       LOG_WARN("the file is out of secure_file_priv", K(ret), K(def->path_));
     }
   }
@@ -3013,7 +3010,12 @@ int ObDMLResolver::infer_file_table_schema(ObFileTableDef &table_def)
       for (size_t i = 0; OB_SUCC(ret) && i < files.size(); ++i) {
         ObString cell;
         ObString file_str(static_cast<int32_t>(files.at(i).size()), files.at(i).data());
-        if (OB_FAIL(ob_write_string(*allocator_, file_str, cell))) {
+        ObString secure_file_priv;
+        if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
+        } else if (OB_FAIL(file_sql_resolver::check_secure_path_for_file(secure_file_priv,
+                                                                        file_str, false,
+                                                                        *allocator_, cell))) {
+          LOG_WARN("glob result is outside secure_file_priv", K(ret));
         } else if (OB_FAIL(table_def.static_cells_.push_back(cell))) {
         }
       }
