@@ -2999,8 +2999,9 @@ int ObTscCgService::generate_text_ir_spec_exprs(const ObTextRetrievalInfo &tr_in
 {
   int ret = OB_SUCCESS;
   ObSEArray<ObExpr *, 4> result_output;
-  if (OB_ISNULL(tr_info.match_expr_) || OB_ISNULL(tr_info.relevance_expr_) ||
-      OB_ISNULL(tr_info.docid_or_rowkey_column_)) {
+  if (OB_ISNULL(tr_info.match_expr_) || OB_ISNULL(tr_info.docid_or_rowkey_column_)
+      || (tr_info.need_calc_relevance_
+          && (OB_ISNULL(tr_info.relevance_expr_) || OB_ISNULL(tr_info.doc_length_column_)))) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(cg_.mark_expr_self_produced(tr_info.match_expr_))) {
   } else if (OB_FAIL(cg_.generate_rt_expr(*tr_info.match_expr_->get_search_key(), text_ir_scan_ctdef.search_text_))) {
@@ -3015,17 +3016,21 @@ int ObTscCgService::generate_text_ir_spec_exprs(const ObTextRetrievalInfo &tr_in
     for (int64_t i = 0; i < inv_scan_col_id.count(); ++i) {
       if (inv_scan_col_id.at(i) == doc_id_column->get_column_id()) {
         doc_id_col_idx = i;
-      } else if (inv_scan_col_id.at(i) == doc_length_column->get_column_id()) {
+      } else if (nullptr != doc_length_column
+          && inv_scan_col_id.at(i) == doc_length_column->get_column_id()) {
         doc_length_col_idx = i;
       }
     }
-    if (OB_UNLIKELY(-1 == doc_id_col_idx || -1 == doc_length_col_idx)) {
+    if (OB_UNLIKELY(-1 == doc_id_col_idx
+        || (tr_info.need_calc_relevance_ && -1 == doc_length_col_idx))) {
       ret = OB_ERR_UNEXPECTED;
     } else {
       text_ir_scan_ctdef.inv_scan_domain_id_col_ =
           text_ir_scan_ctdef.get_inv_idx_scan_ctdef()->pd_expr_spec_.access_exprs_.at(doc_id_col_idx);
-      text_ir_scan_ctdef.inv_scan_doc_length_col_ =
-          text_ir_scan_ctdef.get_inv_idx_scan_ctdef()->pd_expr_spec_.access_exprs_.at(doc_length_col_idx);
+      if (doc_length_col_idx >= 0) {
+        text_ir_scan_ctdef.inv_scan_doc_length_col_ =
+            text_ir_scan_ctdef.get_inv_idx_scan_ctdef()->pd_expr_spec_.access_exprs_.at(doc_length_col_idx);
+      }
       if (OB_FAIL(result_output.push_back(text_ir_scan_ctdef.inv_scan_domain_id_col_))) {
       }
     }

@@ -40,7 +40,11 @@ def main():
 
     def capture(name, sql, values=None):
         # Every query here must execute successfully on both versions.
-        results[name] = query(sql, values)
+        try:
+            results[name] = query(sql, values)
+        except Exception:
+            print('FAILED QUERY', name, sql, repr(values), flush=True)
+            raise
 
     try:
         query('create database `' + database + '`')
