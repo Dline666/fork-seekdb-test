@@ -332,6 +332,24 @@ int assign(const ObColumnSchemaV2 &src_schema);
     add_column_flag(UNUSED_COLUMN_FLAG);
   }
 
+  // Asynchronous AI result columns are stored columns, never synchronous
+  // generated columns. Their expression is evaluated by the post-commit worker.
+  bool is_ai_column() const { return !ai_column_expr_.empty(); }
+  int set_ai_column_expr(const common::ObString &expr) { return deep_copy_str(expr, ai_column_expr_); }
+  const common::ObString &get_ai_column_expr() const { return ai_column_expr_; }
+  int set_ai_dependency_ids(const common::ObString &ids) { return deep_copy_str(ids, ai_dependency_ids_); }
+  const common::ObString &get_ai_dependency_ids() const { return ai_dependency_ids_; }
+  void set_ai_state_column_id(uint64_t id) { ai_state_column_id_ = id; }
+  uint64_t get_ai_state_column_id() const { return ai_state_column_id_; }
+  void set_ai_request_column_id(uint64_t id) { ai_request_column_id_ = id; }
+  uint64_t get_ai_request_column_id() const { return ai_request_column_id_; }
+  void set_ai_result_spec_column_id(uint64_t id) { ai_result_spec_column_id_ = id; }
+  uint64_t get_ai_result_spec_column_id() const { return ai_result_spec_column_id_; }
+  void set_ai_max_retries(int64_t retries) { ai_max_retries_ = retries; }
+  int64_t get_ai_max_retries() const { return ai_max_retries_; }
+  void set_ai_definition_version(int64_t version) { ai_definition_version_ = version; }
+  int64_t get_ai_definition_version() const { return ai_definition_version_; }
+
   //other methods
   int64_t get_convert_size(void) const;
   void reset();
@@ -398,6 +416,13 @@ private:
   ObSkipIndexColumnAttr skip_index_attr_;
   int64_t lob_chunk_size_;
   share::ObLocalSessionVar local_session_vars_;
+  common::ObString ai_column_expr_;
+  common::ObString ai_dependency_ids_;
+  uint64_t ai_state_column_id_;
+  uint64_t ai_request_column_id_;
+  uint64_t ai_result_spec_column_id_;
+  int64_t ai_max_retries_;
+  int64_t ai_definition_version_;
 };
 
 inline int32_t ObColumnSchemaV2::get_data_length() const

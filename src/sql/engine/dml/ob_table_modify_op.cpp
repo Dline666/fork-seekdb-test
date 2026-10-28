@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_table_modify_op.h"
+#include "sql/engine/dml/ai_column_runtime.h"
 #include "share/ob_autoincrement_service.h"
 #include "query/session/ob_inner_sql_connection_access.h"
 #include "sql/engine/ob_physical_plan.h"
@@ -631,6 +632,12 @@ ObTableModifyOp::ObTableModifyOp(ObExecContext &ctx,
   // in NO_BACKSLASH_ESCAPES, obj_print_sql<ObVarcharType> won't escape.
   // We use skip_escape_ to indicate this case. It will finally be passed to ObHexEscapeSqlStr.
   GET_SQL_MODE_BIT(IS_NO_BACKSLASH_ESCAPES, ctx_.get_my_session()->get_sql_mode(), obj_print_params_.skip_escape_);
+}
+
+bool ObTableModifyOp::need_after_row_process(const ObDMLBaseCtDef &ctdef)
+{
+  return need_foreign_key_check(ctdef) || has_after_row_trigger(ctdef) ||
+         AiColumnRuntime::needs_processing(*this, ctdef);
 }
 
 int ObTableModifyOp::inner_open()

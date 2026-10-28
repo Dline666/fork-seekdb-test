@@ -2446,6 +2446,19 @@
     "background_cn": "",
     "ref_url": ""
   },
+  "ai_column_strict_read": {
+    "id": 10754,
+    "name": "ai_column_strict_read",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "reject statements referencing an AI column when any row in that column is not READY",
+    "flags": "SESSION | NEED_SERIALIZE",
+    "publish_version": "226",
+    "info_cn": "严格检查被引用 AI 列的所有行均已就绪",
+    "background_cn": "",
+    "ref_url": ""
+  },
   "enable_file_sql": {
     "id": 10103,
     "name": "enable_file_sql",

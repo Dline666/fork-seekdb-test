@@ -1347,6 +1347,10 @@ int ObServer::start()
     // with _Exit(0), which would turn a failed bootstrap into a false success.
     set_stop();
   } else if (!stop_) {
+    if (OB_FAIL(ai_column_worker_.start())) {
+      LOG_ERROR("failed to start AI column worker", KR(ret));
+      return ret;
+    }
     GCTX.status_ = SS_SERVING;
     GCTX.start_service_time_ = start_service_time;
     FLOG_INFO("[OBSERVER_NOTICE] observer start service", "start_service_time", GCTX.start_service_time_);
@@ -1559,6 +1563,9 @@ int ObServer::stop()
     // Otherwise session cleanup waits for a loader query that cannot publish its schema.
     stop_in_process_package_ddl(mods_ddl_service_launcher_, mods_system_package_load_service_);
   }
+
+  ai_column_worker_.stop();
+  ai_column_worker_.wait();
 
   FLOG_INFO("begin to stop OB_LOGGER");
   OB_LOGGER.stop();

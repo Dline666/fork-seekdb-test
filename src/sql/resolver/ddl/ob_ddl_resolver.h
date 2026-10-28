@@ -59,7 +59,8 @@ enum NUMCHILD {
   COLUMN_DEFINITION_NUM_CHILD = 4,
   COLUMN_DEF_NUM_CHILD = 3,
   INDEX_NUM_CHILD = 5,
-  GEN_COLUMN_DEFINITION_NUM_CHILD = 7
+  GEN_COLUMN_DEFINITION_NUM_CHILD = 7,
+  AI_COLUMN_DEFINITION_NUM_CHILD = 6
 };
 
 struct ObColumnResolveStat
@@ -109,6 +110,12 @@ struct ObDefaultValueRes
 class ObDDLResolver : public ObStmtResolver
 {
 public:
+  static int resolve_ai_column_dependencies(share::schema::ObColumnSchemaV2 &column,
+      const ParseNode &expression, const share::schema::ObTableSchema &table);
+  static int build_ai_hidden_columns(share::schema::ObColumnSchemaV2 &column,
+      uint64_t &max_column_id, common::ObIArray<share::schema::ObColumnSchemaV2> &columns);
+  int resolve_ai_column_definition(share::schema::ObColumnSchemaV2 &column,
+      const ParseNode &expression, const ParseNode *options);
   enum INDEX_TYPE {
     NOT_SPECIFIED = 0,
     LOCAL_INDEX = 1,

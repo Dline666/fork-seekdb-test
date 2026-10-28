@@ -26,8 +26,10 @@ def main():
                         help='mysqltest executable (defaults to mysqltest on PATH).')
     parser.add_argument('--output-dir', type=pathlib.Path,
                         default=pathlib.Path.cwd() / 'work/ai-functions-validation')
-    parser.add_argument('--skip-provider', action='store_true', help='Run only the four public mysqltest suites.')
+    parser.add_argument('--enhancement-first', action='store_true', help='Run AI enhancement before any warm-up suites to exercise cold startup.')
+    parser.add_argument('--skip-provider', action='store_true', help='Run only the four mysqltest suites.')
     args = parser.parse_args()
+    cases = (CASES[-1], *CASES[:-1]) if args.enhancement_first else CASES
     if args.mysqltest is None:
         parser.error('mysqltest was not found on PATH; pass --mysqltest /path/to/mysqltest')
     for name in ('binary', 'mysqltest'):
@@ -51,7 +53,7 @@ def main():
     enhancement_mock = suite / 'include/ai_function_enhancement_mock.py'
     provider = args.repo / 'unittest/sql/engine/expr/test_ai_provider_sql.py'
     summary_path = output / 'ai-functions-ready-summary.json'
-    log_paths = [output / ('ai-functions-ready-' + case + '.log') for case in CASES]
+    log_paths = [output / ('ai-functions-ready-' + case + '.log') for case in cases]
     log_paths.append(output / 'ai-functions-ready-provider.log')
     # Clear exactly this runner's previous results before producing new evidence.
     for path in log_paths + [summary_path]:
@@ -71,7 +73,7 @@ def main():
         revision = None
     summary = {'binary': str(args.binary), 'binary_sha256': digest.hexdigest(),
                'repo': str(args.repo), 'revision': revision, 'runtime': str(runtime),
-               'sql_suites': [], 'provider': None, 'error': None}
+               'case_order': list(cases), 'sql_suites': [], 'provider': None, 'error': None}
     server = mock = None
     connection = None
     console = mock_console = None
@@ -106,7 +108,7 @@ def main():
             cursor.execute('create database ai_functions_validation')
         connection.close()
         connection = None
-        for case in CASES:
+        for case in cases:
             if case == 'ai_function_enhancement':
                 try:
                     with socket.create_connection(('127.0.0.1', 8000), timeout=.1):

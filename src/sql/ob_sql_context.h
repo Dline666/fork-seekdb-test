@@ -566,6 +566,7 @@ public:
       temp_table_count_(0),
       anonymous_view_count_(0),
       all_user_variable_(),
+      ai_column_read_refs_(),
       need_match_all_params_(false),
       has_udf_(false),
       disable_udf_parallel_(false),
@@ -608,6 +609,7 @@ public:
     temp_table_count_ = 0;
     anonymous_view_count_ = 0;
     all_user_variable_.reset();
+    ai_column_read_refs_.reset();
     need_match_all_params_= false;
     has_udf_ = false;
     disable_udf_parallel_ = false;
@@ -698,6 +700,8 @@ public:
   common::ObSArray<ObPCPrivInfo, common::ModulePageAllocator, true> all_priv_constraints_;
   common::ObSArray<ObLocalSessionVar, common::ModulePageAllocator, true> all_local_session_vars_;
   common::ObSArray<ObUserVarIdentRawExpr *, common::ModulePageAllocator, true> all_user_variable_;
+  // Pairs of native table ID and AI state column ID, recorded before rewrites.
+  common::ObSEArray<uint64_t, 8, common::ModulePageAllocator, true> ai_column_read_refs_;
   common::hash::ObHashMap<uint64_t, ObObj, common::hash::NoPthreadDefendMode> calculable_expr_results_;
   bool need_match_all_params_; //only used for matching plans
   bool has_udf_;

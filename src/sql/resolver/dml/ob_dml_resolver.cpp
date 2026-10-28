@@ -1840,6 +1840,7 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
   if (NULL == stmt) {
     stmt = get_stmt();
   }
+  include_hidden = include_hidden || (nullptr != session_info_ && session_info_->is_ai_column_internal());
   if (OB_ISNULL(stmt)
       || OB_ISNULL(schema_checker_)
       || OB_ISNULL(schema_guard = schema_checker_->get_schema_guard())
@@ -1958,6 +1959,27 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
       } else if (OB_FAIL(col_expr->pull_relation_id())) {
       } else {
         col_item = stmt->get_column_item(stmt->get_column_size() - 1);
+      }
+    }
+  }
+  if (OB_SUCC(ret) && !include_hidden && !session_info_->is_ai_column_internal()
+      && !stmt->is_insert_stmt() && nullptr != col_item && nullptr != stmt->get_query_ctx()) {
+    const ObColumnSchemaV2 *ai_column = nullptr;
+    if (OB_FAIL(schema_guard->get_column_schema(table_item.ref_id_, col_item->column_id_, ai_column))) {
+    } else if (nullptr != ai_column && ai_column->is_ai_column()) {
+      auto &refs = stmt->get_query_ctx()->ai_column_read_refs_;
+      bool recorded = false;
+      for (int64_t i = 0; i + 1 < refs.count(); i += 2) {
+        if (refs.at(i) == table_item.ref_id_
+            && refs.at(i + 1) == ai_column->get_ai_state_column_id()) {
+          recorded = true;
+          break;
+        }
+      }
+      if (!recorded) {
+        if (OB_FAIL(refs.push_back(table_item.ref_id_))) {
+        } else if (OB_FAIL(refs.push_back(ai_column->get_ai_state_column_id()))) {
+        }
       }
     }
   }

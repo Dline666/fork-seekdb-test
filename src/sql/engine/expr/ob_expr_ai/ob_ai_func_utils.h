@@ -357,9 +357,11 @@ public:
   ObAIFuncModel(ObIAllocator &allocator, const ObAIFuncExprInfo &info, const share::ObAiModelEndpointInfo &endpoint_info)
   : allocator_(&allocator),
     info_(info),
-    endpoint_info_(endpoint_info)
+    endpoint_info_(endpoint_info),
+    max_retry_times_(3)
   {}
    virtual ~ObAIFuncModel() {}
+   void set_max_retry_times(int64_t retries) { max_retry_times_ = retries < 0 ? 0 : retries; }
    // completion
    int call_completion(ObString &prompt, ObJsonObject *config, ObString &result);
    int call_completion_vector(ObArray<ObString> &prompts, ObJsonObject *config, ObArray<ObString> &results);
@@ -377,6 +379,7 @@ public:
    ObIAllocator *allocator_;
    const ObAIFuncExprInfo &info_;
    const share::ObAiModelEndpointInfo &endpoint_info_;
+   int64_t max_retry_times_;
    DISALLOW_COPY_AND_ASSIGN(ObAIFuncModel);
 };
 

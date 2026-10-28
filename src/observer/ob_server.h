@@ -22,6 +22,7 @@
 #endif
 #include "lib/net/ob_net_util.h"
 #include "lib/task/ob_timer.h"
+#include "sql/engine/dml/ai_column_runtime.h"
 #include "lib/random/ob_mysql_random.h"
 #include "lib/container/ob_iarray.h"
 
@@ -486,6 +487,7 @@ private:
   ObServerDutyTask duty_task_;
   ObSqlMemoryTimerTask sql_mem_task_;
   ObCTASCleanUpTask ctas_clean_up_task_;     // repeat & no retry
+  sql::AiColumnWorker ai_column_worker_;
   ObRedefTableHeartBeatTask redef_table_heart_beat_task_;
   ObRefreshCpuFreqTimeTask refresh_cpu_frequency_task_;
   blocksstable::ObStorageEnv storage_env_;

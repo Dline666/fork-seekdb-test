@@ -25,6 +25,10 @@
 #include "sql/session/ob_local_session_var.h"
 #include "query/command/ob_root_command_service.h"
 #include "query/vector/ob_vector_index_util.h"
+#include <algorithm>
+#include <functional>
+#include <string>
+#include <vector>
 
 namespace oceanbase
 {
@@ -344,9 +348,144 @@ int ObAlterTableResolver::check_alter_column_schemas_valid(ObAlterTableStmt &stm
   return ret;
 }
 
+namespace
+{
+std::string ai_retry_ident(const ObString &name)
+{
+  std::string quoted("`");
+  for (int64_t i = 0; i < name.length(); ++i) {
+    if (name.ptr()[i] == '`') quoted += '`';
+    quoted += name.ptr()[i];
+  }
+  quoted += '`';
+  return quoted;
+}
+
+int reject_ai_dependency_change(const ObTableSchema &table, const ObString &name)
+{
+  int ret = OB_SUCCESS;
+  const ObColumnSchemaV2 *changed = table.get_column_schema(name);
+  if (nullptr != changed) {
+    const std::string id = std::to_string(changed->get_column_id());
+    for (auto it = table.column_begin(); OB_SUCC(ret) && it != table.column_end(); ++it) {
+      const ObColumnSchemaV2 &column = **it;
+      if (!column.is_ai_column()) continue;
+      const ObString &dependencies = column.get_ai_dependency_ids();
+      const std::string ids(dependencies.empty() ? "" : dependencies.ptr(), dependencies.length());
+      size_t begin = 0;
+      while (OB_SUCC(ret) && begin < ids.size()) {
+        const size_t comma = ids.find(',', begin);
+        const size_t end = std::string::npos == comma ? ids.size() : comma;
+        if (0 == ids.compare(begin, end - begin, id)) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "dropping or renaming a column referenced by an AI COLUMN");
+        }
+        begin = end + 1;
+      }
+    }
+  }
+  return ret;
+}
+
+int ai_retry_status_offsets(const ParseNode *node, int depth, std::vector<int64_t> &offsets)
+{
+  int ret = OB_SUCCESS;
+  if (node == nullptr) {
+  } else if (depth > 256) {
+    ret = OB_SIZE_OVERFLOW;
+  } else if (node->type_ == T_COLUMN_REF && node->num_child_ == 3
+             && node->children_ != nullptr && node->children_[0] == nullptr
+             && node->children_[1] == nullptr && node->children_[2] != nullptr) {
+    const ParseNode &name = *node->children_[2];
+    if (!name.is_input_quoted_ && name.str_value_ != nullptr
+        && ObString(static_cast<int32_t>(name.str_len_), name.str_value_).case_compare("status") == 0) {
+      offsets.push_back(name.sql_str_off_);
+    }
+  } else if (node->children_ != nullptr) {
+    for (int32_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+      ret = ai_retry_status_offsets(node->children_[i], depth + 1, offsets);
+    }
+  }
+  return ret;
+}
+}
+
+int ObAlterTableResolver::resolve_ai_column_retry(const ParseNode &node)
+{
+  int ret = OB_SUCCESS;
+  ObAlterTableStmt *stmt = get_alter_table_stmt();
+  const ObColumnSchemaV2 *column = nullptr;
+  if (node.type_ != T_AI_COLUMN_RETRY || node.num_child_ != 2 || node.children_ == nullptr
+      || node.children_[0] == nullptr || table_schema_ == nullptr || stmt == nullptr) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    const ParseNode &name = *node.children_[0];
+    column = table_schema_->get_column_schema(ObString(static_cast<int32_t>(name.str_len_), name.str_value_));
+    if (column == nullptr || !column->is_ai_column()) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+    }
+  }
+  if (OB_SUCC(ret)) {
+    const ObColumnSchemaV2 *state = table_schema_->get_column_schema(column->get_ai_state_column_id());
+    std::string predicate;
+    const ParseNode *where = node.children_[1];
+    if (state == nullptr) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (where != nullptr) {
+      std::vector<int64_t> offsets;
+      if (where->num_child_ != 1 || where->children_ == nullptr || where->str_value_ == nullptr
+          || where->str_len_ < 0) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(ai_retry_status_offsets(where->children_[0], 0, offsets))) {
+      } else {
+        predicate.assign(where->str_value_, static_cast<size_t>(where->str_len_));
+        std::sort(offsets.begin(), offsets.end(), std::greater<int64_t>());
+        offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+        const std::string state_name = ai_retry_ident(state->get_column_name_str());
+        for (int64_t offset : offsets) {
+          const int64_t position = offset - where->sql_str_off_;
+          if (position < 0 || position > where->str_len_ - 6
+              || ObString(6, predicate.data() + position).case_compare("status") != 0) {
+            ret = OB_ERR_UNEXPECTED;
+            break;
+          }
+          predicate.replace(static_cast<size_t>(position), 6, state_name);
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      std::string sql = "UPDATE " + ai_retry_ident(stmt->get_org_database_name()) + "."
+          + ai_retry_ident(stmt->get_org_table_name()) + " SET "
+          + ai_retry_ident(column->get_column_name_str()) + "=NULL";
+      if (!predicate.empty()) sql += " WHERE " + predicate;
+      ObString copied;
+      if (OB_FAIL(ob_write_string(*allocator_, ObString(static_cast<int32_t>(sql.size()), sql.c_str()), copied, true))) {
+      } else {
+        stmt->set_ai_column_retry(column->get_column_id(), copied);
+        stmt->inc_alter_table_action_count();
+      }
+    }
+  }
+  return ret;
+}
+
 int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
 {
   int ret = OB_SUCCESS;
+  // RETRY publishes work through DML, and is deliberately a standalone ALTER
+  // operation. Reject mixed actions before resolving or mutating any schema.
+  for (int32_t i = 0; i < node.num_child_ && node.children_ != nullptr; ++i) {
+    if (node.children_[i] != nullptr && node.children_[i]->type_ == T_AI_COLUMN_RETRY) {
+      if (node.num_child_ != 1) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+      } else {
+        ret = resolve_ai_column_retry(*node.children_[i]);
+      }
+      return ret;
+    }
+  }
   ObAlterTableStmt *alter_table_stmt = get_alter_table_stmt();
   if (OB_UNLIKELY(node.num_child_ <= 0) || OB_ISNULL(node.children_)) {
     ret = OB_ERR_UNEXPECTED;
@@ -3529,8 +3668,21 @@ int ObAlterTableResolver::resolve_alter_table_column_definition(AlterColumnSchem
               false,
               false,
               allow_has_default))) {
+  } else if (AI_COLUMN_DEFINITION_NUM_CHILD == node->num_child_
+             && OB_FAIL(resolve_ai_column_dependencies(column, *node->children_[4], *table_schema_))) {
   } else { // add column level constraint
     add_or_modify_check_cst_times_ += alter_table_schema.get_constraint_count() - cst_cnt;
+  }
+  if (OB_SUCC(ret) && column.is_ai_column()) {
+    const ObColumnSchemaV2 *original = table_schema_->get_column_schema(column.get_column_name_str());
+    if (nullptr != original && original->is_ai_column()) {
+      column.set_ai_state_column_id(original->get_ai_state_column_id());
+      column.set_ai_request_column_id(original->get_ai_request_column_id());
+      column.set_ai_result_spec_column_id(original->get_ai_result_spec_column_id());
+    } else if (nullptr != original) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "converting an ordinary column to AI COLUMN; use ADD COLUMN");
+    }
   }
   // else if (OB_FAIL(process_default_value(stat, column))) {
   //   SQL_RESV_LOG(WARN, "failed to set default value", K(ret));
@@ -3863,6 +4015,10 @@ int ObAlterTableResolver::resolve_change_column(const ParseNode &node)
                        table_schema_->get_table_name_str().ptr());
       }
     }
+    if (OB_SUCC(ret) && nullptr != origin_col_schema && origin_col_schema->is_ai_column()) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "CHANGE COLUMN on an AI COLUMN; use MODIFY COLUMN");
+    }
     //resolve new column definition
     if (OB_SUCC(ret)) {
       ObColumnResolveStat stat;
@@ -3880,6 +4036,8 @@ int ObAlterTableResolver::resolve_change_column(const ParseNode &node)
       ObSEArray<ObColumnSchemaV2 *, 8> resolved_cols;
       if (OB_FAIL(get_table_schema_all_column_schema(resolved_cols, alter_table_stmt->get_alter_table_schema()))) {
       } else if (OB_FAIL(resolve_alter_table_column_definition(alter_column_schema, node.children_[1], stat, is_modify_column_visibility, resolved_cols))) {
+      } else if (0 != origin_column_name.case_compare(alter_column_schema.get_column_name_str())
+                 && OB_FAIL(reject_ai_dependency_change(*table_schema_, origin_column_name))) {
       } else if (!stat.is_primary_key_ && OB_FAIL(resolve_alter_column_not_null(alter_column_schema, *origin_col_schema))) {
       } else {
         //TODO(xiyu):hanlde change column c2 c3 int unique key; support unique key
@@ -4204,6 +4362,7 @@ int ObAlterTableResolver::resolve_drop_column(
       } else if (OB_FAIL(resolve_column_definition_ref(alter_column_schema,
                                                         node.children_[i], true))) {
       } else if (OB_FAIL(alter_column_schema.set_column_name(alter_column_schema.get_origin_column_name()))) {
+      } else if (OB_FAIL(reject_ai_dependency_change(*table_schema_, alter_column_schema.get_origin_column_name()))) {
       } else {
         if (OB_SUCC(ret)) {
           alter_column_schema.alter_type_ = OB_DDL_DROP_COLUMN;
@@ -4352,6 +4511,8 @@ int ObAlterTableResolver::resolve_rename_column(const ParseNode &node)
                        table_schema_->get_table_name_str().ptr());
       }
       SQL_RESV_LOG(WARN, "fail to get origin column schema", K(ret));
+    } else if (0 != origin_column_name.case_compare(new_column_name)
+               && OB_FAIL(reject_ai_dependency_change(*table_schema_, origin_column_name))) {
     } else if (OB_FAIL(alter_column_schema.assign(*origin_col_schema))) {
     } else if (OB_FAIL(alter_column_schema.set_origin_column_name(origin_column_name))) {
     } else if (OB_FAIL(alter_column_schema.set_column_name(new_column_name))) {

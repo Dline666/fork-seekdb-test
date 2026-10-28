@@ -751,6 +751,100 @@ int ObAlterTableExecutor::alter_table_exchange_partition_rpc(obcall::ObExchangeP
   return ret;
 }
 
+namespace {
+int execute_ai_column_retry_update(ObExecContext &ctx, const uint64_t column_id,
+                                   const ObString &sql, const bool check_privileges)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = ctx.get_my_session();
+  common::sqlclient::ObISQLConnectionGuard conn_guard;
+  common::sqlclient::ObISQLConnection *conn = nullptr;
+  int64_t affected_rows = 0;
+  if (nullptr == session) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    const bool saved_internal = session->is_ai_column_internal();
+    const uint64_t saved_retry_id = session->get_ai_column_retry_id();
+    bool saved_autocommit = false;
+    if (OB_FAIL(session->get_autocommit(saved_autocommit))) {
+    } else if (!saved_autocommit && OB_FAIL(session->set_autocommit(true))) {
+    } else {
+      session->set_ai_column_internal(true);
+      session->set_ai_column_retry_id(column_id);
+      if (OB_FAIL(query::ObInnerSQLConnectionAccess::create_connection_with_external_session(session, conn_guard))) {
+      } else if (OB_ISNULL(conn = conn_guard.get_ptr())) {
+        ret = OB_INNER_STAT_ERROR;
+      } else {
+        conn->set_check_priv(check_privileges);
+        ret = conn->execute_write(sql.ptr(), affected_rows, true);
+      }
+      conn_guard.reset();
+      session->set_ai_column_retry_id(saved_retry_id);
+      session->set_ai_column_internal(saved_internal);
+      if (!saved_autocommit) {
+        const int reset_ret = session->set_autocommit(saved_autocommit);
+        if (OB_SUCC(ret)) ret = reset_ret;
+      }
+    }
+  }
+  return ret;
+}
+int append_ai_ddl_identifier(ObSqlString &sql, const ObString &name)
+{
+  int ret = sql.append("`");
+  for (int64_t i = 0; OB_SUCC(ret) && i < name.length(); ++i) {
+    if ('`' == name.ptr()[i]) ret = sql.append("`");
+    if (OB_SUCC(ret)) ret = sql.append(ObString(1, name.ptr() + i));
+  }
+  if (OB_SUCC(ret)) ret = sql.append("`");
+  return ret;
+}
+int backfill_altered_ai_columns(ObExecContext &ctx, ObAlterTableStmt &stmt)
+{
+  int ret = OB_SUCCESS;
+  const AlterTableSchema &altered = stmt.get_alter_table_arg().alter_table_schema_;
+  bool has_ai_columns = false;
+  for (auto it = altered.column_begin(); !has_ai_columns && it != altered.column_end(); ++it) {
+    const AlterColumnSchema &column = *static_cast<const AlterColumnSchema *>(*it);
+    has_ai_columns = column.is_ai_column()
+        && (OB_DDL_ADD_COLUMN == column.alter_type_ || OB_DDL_MODIFY_COLUMN == column.alter_type_);
+  }
+  if (has_ai_columns) {
+    ObSchemaGetterGuard guard;
+    const ObTableSchema *table = nullptr;
+    const ObString &db_name = stmt.get_database_name().empty() ? stmt.get_org_database_name() : stmt.get_database_name();
+    const ObString &table_name = stmt.get_table_name().empty() ? stmt.get_org_table_name() : stmt.get_table_name();
+    if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(guard))) {
+    } else if (OB_FAIL(guard.get_table_schema(db_name, table_name, false, table))) {
+    } else if (nullptr == table) {
+      ret = OB_TABLE_NOT_EXIST;
+    } else {
+      for (auto it = altered.column_begin(); OB_SUCC(ret) && it != altered.column_end(); ++it) {
+        const AlterColumnSchema &definition = *static_cast<const AlterColumnSchema *>(*it);
+        if (definition.is_ai_column()
+            && (OB_DDL_ADD_COLUMN == definition.alter_type_ || OB_DDL_MODIFY_COLUMN == definition.alter_type_)) {
+          const ObColumnSchemaV2 *column = table->get_column_schema(definition.get_column_name_str());
+          ObSqlString sql;
+          if (nullptr == column || !column->is_ai_column()) {
+            ret = OB_SCHEMA_ERROR;
+          } else if (OB_FAIL(sql.append("UPDATE "))) {
+          } else if (OB_FAIL(append_ai_ddl_identifier(sql, db_name))) {
+          } else if (OB_FAIL(sql.append("."))) {
+          } else if (OB_FAIL(append_ai_ddl_identifier(sql, table_name))) {
+          } else if (OB_FAIL(sql.append(" SET "))) {
+          } else if (OB_FAIL(append_ai_ddl_identifier(sql, column->get_column_name_str()))) {
+          } else if (OB_FAIL(sql.append("="))) {
+          } else if (OB_FAIL(append_ai_ddl_identifier(sql, column->get_column_name_str()))) {
+          } else if (OB_FAIL(execute_ai_column_retry_update(ctx, column->get_column_id(), sql.string(), false))) {
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+} // namespace
+
 int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
 {
   int ret = OB_SUCCESS;
@@ -762,6 +856,9 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
   OV (OB_NOT_NULL(task_exec_ctx = GET_SQL_EXECUTOR_CTX(ctx)), OB_NOT_INIT);
   if (OB_FAIL(ret)) {
     // do nothing
+  } else if (stmt.is_ai_column_retry()) {
+    ret = execute_ai_column_retry_update(ctx, stmt.get_ai_column_retry_id(),
+                                         stmt.get_ai_column_retry_sql(), true);
   } else if (stmt.is_alter_triggers()) {
     if (stmt.get_tg_arg().trigger_infos_.count() > 0) {
       stmt.get_tg_arg().ddl_stmt_str_ = first_stmt;
@@ -865,6 +962,18 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
             res.task_id_, res.ddl_need_retry_at_executor_, my_session,
             *ctx.get_query_runtime_environment(), ctx.local_command_service(), is_support_cancel))) {
         }
+      }
+    }
+    // DDL has committed and its schema is published before this separate T1
+    // invalidates old values and creates the ordinary durable outbox tasks.
+    bool has_ai_ddl = false;
+    for (auto it = alter_table_arg.alter_table_schema_.column_begin();
+         !has_ai_ddl && it != alter_table_arg.alter_table_schema_.column_end(); ++it) {
+      has_ai_ddl = (*it)->is_ai_column();
+    }
+    if (OB_SUCC(ret) && has_ai_ddl) {
+      if (OB_FAIL(refresh_schema_for_table())) {
+      } else if (OB_FAIL(backfill_altered_ai_columns(ctx, stmt))) {
       }
     }
     char table_info_buffer[256];

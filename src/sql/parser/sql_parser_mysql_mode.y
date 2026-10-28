@@ -335,7 +335,7 @@ END_P SET_VAR DELIMITER
         QUANTIFIER_TABLE QUARTER QUERY QUEUE_TIME QUICK
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
-        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETRY RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -397,6 +397,7 @@ END_P SET_VAR DELIMITER
 %type <node> update_basic_stmt delete_basic_stmt
 %type <node> table_element_list table_element column_definition column_definition_ref column_definition_list column_name_list
 %type <node> opt_generated_keyname opt_generated_option_list opt_generated_column_attribute_list generated_column_attribute opt_storage_type
+%type <node> opt_ai_column_options opt_ai_retry_where
 %type <node> data_type special_table_type opt_if_not_exists opt_if_exists opt_charset collation opt_collation cast_data_type
 %type <node> replace_with_opt_hint insert_with_opt_hint column_list opt_on_duplicate_key_clause opt_into opt_replace opt_temporary no_param_column_ref
 %type <node> insert_vals_list insert_vals value_or_values opt_insert_row_alias
@@ -4846,6 +4847,13 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   set_data_type_collation($2, attributes, false, true);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, $2, attributes, $5);
 }
+| column_definition_ref data_type opt_collation AI COLUMN '(' expr ')' opt_ai_column_options opt_position_column
+{
+  ParseNode *attributes = NULL;
+  set_data_type_collation($2, $3, true, false);
+  dup_expr_string($7, result, @7.first_column, @7.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 6, $1, $2, attributes, $10, $7, $9);
+}
 | column_definition_ref data_type opt_collation opt_generated_keyname AS '(' expr ')' opt_storage_type opt_generated_column_attribute_list opt_column_reference opt_position_column
 {
   (void)($11);
@@ -4880,6 +4888,17 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   malloc_non_terminal_node(attributes, result->malloc_pool_, T_LINK_NODE, 2, attributes, unique_attr);
   merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, attributes);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, unsigned_bigint_type, attributes, $4);
+}
+;
+
+opt_ai_column_options:
+/* empty */
+{
+  $$ = NULL;
+}
+| WITH '(' file_opt_list ')'
+{
+  $$ = $3;
 }
 ;
 
@@ -12667,6 +12686,14 @@ SHOW opt_extended_or_full TABLES opt_from_or_in_database_clause opt_show_conditi
   $$->value_ = $2[0];
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $5, $6, $7);
 }
+| SHOW AI columns_or_fields from_or_in relation_factor opt_from_or_in_database_clause opt_show_condition
+{
+  (void)$3;
+  (void)$4;
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 4;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $5, $6, $7);
+}
 | SHOW TABLE STATUS opt_from_or_in_database_clause opt_show_condition
 { malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_TABLE_STATUS, 2, $4, $5); }
 | SHOW PROCEDURE STATUS opt_from_or_in_database_clause opt_show_condition
@@ -14710,6 +14737,12 @@ alter_table_action
     $$ = $1;
   }
 }
+| alter_table_actions ',' RETRY AI COLUMN column_name opt_ai_retry_where
+{
+  ParseNode *retry = NULL;
+  malloc_non_terminal_node(retry, result->malloc_pool_, T_AI_COLUMN_RETRY, 2, $6, $7);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, retry);
+}
 ;
 
 alter_table_action:
@@ -14811,6 +14844,20 @@ standalone_alter_action:
 alter_partition_option
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_PARTITION_OPTION, 1, $1);
+}
+| RETRY AI COLUMN column_name opt_ai_retry_where
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_RETRY, 2, $4, $5);
+}
+;
+
+opt_ai_retry_where:
+/* empty */ { $$ = NULL; }
+| WHERE expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_WHERE_CLAUSE, 1, $2);
+  dup_string($$, result, @2.first_column, @2.last_column);
+  $$->sql_str_off_ = @2.first_column - 1;
 }
 ;
 
@@ -18150,6 +18197,7 @@ ACCOUNT
 |       RESTART
 |       RESTORE
 |       RESUME
+|       RETRY
 |       RETURNED_SQLSTATE
 |       RETURNING
 |       RETURNS

@@ -129,6 +129,7 @@ int ObExprAIEmbed::eval_ai_embed(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &re
                    model_id, temp_allocator, resolved_endpoint))) {
     } else {
       ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
+      if (ctx.exec_ctx_.get_my_session()->is_ai_column_internal()) { model.set_max_retry_times(0); }
       ObString result;
       if (OB_FAIL(model.call_dense_embedding(content, config, result))) {
       } else if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res, result))) {
@@ -245,6 +246,7 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr,
                      model_ids.at(group_begin), temp_allocator, resolved_endpoint))) {
       } else {
         ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
+      if (ctx.exec_ctx_.get_my_session()->is_ai_column_internal()) { model.set_max_retry_times(0); }
         for (int64_t chunk_begin = group_begin; OB_SUCC(ret) && chunk_begin < group_end;) {
           int64_t chunk_end = chunk_begin + ObAIFuncUtils::MAX_EMBED_BATCH_INPUTS;
           if (chunk_end > group_end) {

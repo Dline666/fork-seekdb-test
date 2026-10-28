@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "config_bridge.h"
+#include "sql/engine/dml/ai_column_runtime.h"
 #include "sql/engine/dml/ob_dml_service.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 #include "share/rc/ob_server_runtime.h"
@@ -1898,6 +1899,10 @@ int ObDMLService::check_nested_sql_legality(ObExecContext &ctx, common::ObTableI
 {
   int ret = OB_SUCCESS;
   ObSQLSessionInfo *session = ctx.get_my_session();
+  if (session->is_ai_column_internal()) {
+    // The kernel owns this nested write, after the outer DAS batch was flushed.
+    return OB_SUCCESS;
+  }
   if (session->get_is_deserialized() && ctx.get_parent_ctx() != nullptr) {
     // Nested SQL in a distributed worker lacks transaction scheduler control.
     pl::ObPLContext *pl_ctx = ctx.get_parent_ctx()->get_pl_stack_ctx();
@@ -2165,6 +2170,9 @@ int ObDMLService::handle_after_processing_multi_row(ObDMLModifyRowsList *dml_mod
             }
           }
         }
+        if (OB_SUCC(ret) && OB_FAIL(AiColumnRuntime::after_row(op, dml_ctdef, dml_event))) {
+          LOG_WARN("failed to enqueue AI column change", K(ret));
+        }
         // process after row trigger
         if (OB_SUCC(ret) && dml_ctdef.trig_ctdef_.all_tm_points_.has_after_row()) {
           ObEvalCtx &eval_ctx = op.get_eval_ctx();
@@ -2216,6 +2224,9 @@ int ObDMLService::handle_after_processing_single_row(ObDMLModifyRowNode &modify_
         }
       } else if (OB_FAIL(ForeignKeyHandle::do_handle(op, dml_ctdef, dml_rtdef))) {
       }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(AiColumnRuntime::after_row(op, dml_ctdef, dml_event))) {
+      LOG_WARN("failed to enqueue AI column change", K(ret));
     }
     if (OB_SUCC(ret) && OB_FAIL(TriggerHandle::do_handle_after_row(op, dml_ctdef.trig_ctdef_, dml_rtdef.trig_rtdef_, dml_event))) {
     }

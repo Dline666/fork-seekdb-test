@@ -884,6 +884,30 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       }
     }
 
+    // Resolve dependencies only after every user column has its final ID.  AI
+    // result columns remain ordinary stored columns, with three private fields.
+    if (OB_SUCC(ret) && RESOLVE_NON_COL != resolve_rule) {
+      ObSEArray<ObColumnSchemaV2, 6> ai_hidden_columns;
+      for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+        const ParseNode *definition = node->children_[i];
+        if (nullptr != definition && T_COLUMN_DEFINITION == definition->type_
+            && AI_COLUMN_DEFINITION_NUM_CHILD == definition->num_child_) {
+          const ParseNode *name = definition->children_[0]->children_[2];
+          ObColumnSchemaV2 *column = table_schema.get_column_schema(
+              ObString(static_cast<int32_t>(name->str_len_), name->str_value_));
+          if (OB_ISNULL(column)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_FAIL(resolve_ai_column_dependencies(*column, *definition->children_[4], table_schema))) {
+          } else if (OB_FAIL(build_ai_hidden_columns(*column, cur_column_id_, ai_hidden_columns))) {
+          }
+        }
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < ai_hidden_columns.count(); ++i) {
+        if (OB_FAIL(table_schema.add_column(ai_hidden_columns.at(i)))) {
+        }
+      }
+    }
+
     if (OB_SUCC(ret)) {
       for (int32_t i = resolved_cols_count; i < resolved_cols.count() && OB_SUCC(ret); i++) {
         ObColumnSchemaV2 &hidden_col = resolved_cols.at(i);

@@ -342,7 +342,14 @@ all_column_def = dict(
       ('sub_data_type', 'int', 'false', '0'),
       ('skip_index_attr', 'int', 'false', '0'),
       ('lob_chunk_size', 'int', 'false', 'OB_DEFAULT_LOB_CHUNK_SIZE'),
-      ('local_session_vars', 'longtext', 'true')
+      ('local_session_vars', 'longtext', 'true'),
+      ('ai_column_expr', 'longtext', 'true', ''),
+      ('ai_dependency_ids', 'varchar:OB_MAX_VARCHAR_LENGTH', 'true', ''),
+      ('ai_state_column_id', 'int', 'false', '-1'),
+      ('ai_request_column_id', 'int', 'false', '-1'),
+      ('ai_result_spec_column_id', 'int', 'false', '-1'),
+      ('ai_max_retries', 'int', 'false', '2'),
+      ('ai_definition_version', 'int', 'false', '0')
   ]
   )
 
@@ -830,6 +837,9 @@ def_table_schema(
   ]
   )
 
+
+
+
 def_table_schema(
   owner = 'zhenling.zzg',
   table_name = '__all_aux_stat',
@@ -849,6 +859,20 @@ def_table_schema(
   ]
   )
 
+
+# Transactional AI work outbox. Rows are visible to workers only after T1 commit.
+def_table_schema(
+  owner = 'seekdb', table_name = '__all_ai_column_task', table_id = '599',
+  table_type = 'SYSTEM_TABLE', gm_columns = ['gmt_create', 'gmt_modified'],
+  rowkey_columns = [('task_id', 'varchar:128')],
+  normal_columns = [
+    ('table_id', 'int'), ('column_id', 'int'),
+    ('rowkey_predicate', 'varchar:4096'), ('request_id', 'varchar:64'),
+    ('definition_version', 'int'), ('eligible_ts', 'timestamp'),
+    ('retry_count', 'int'), ('max_retries', 'int'), ('state', 'int'),
+    ('owner_id', 'varchar:128', 'true'), ('lease_until', 'timestamp', 'true'),
+    ('result_value', 'longtext', 'true'), ('result_is_null', 'int')
+  ])
 
 #
 # Other System Table [1000, 10000)
@@ -14455,3 +14479,24 @@ def_sys_index_table(
 # Agent table Index
 # End Agent table Index
 ################################################################################
+
+# Asynchronous AI column definitions share the owning column's DDL transaction.
+def_table_schema(
+  owner = 'seekdb-ai-column',
+  table_name = '__all_ai_column',
+  table_id = '28001',
+  table_type = 'SYSTEM_VIEW',
+  gm_columns = [], rowkey_columns = [], normal_columns = [],
+  view_definition = """
+SELECT table_id, column_id, column_name,
+       ai_column_expr AS normalized_expr,
+       ai_dependency_ids AS dependency_column_ids,
+       ai_state_column_id AS state_column_id,
+       ai_request_column_id AS request_column_id,
+       ai_result_spec_column_id AS result_spec_column_id,
+       ai_max_retries AS max_retries,
+       ai_definition_version AS definition_version,
+       'async' AS sync_mode
+FROM oceanbase.__all_column WHERE ai_column_expr <> ''
+""".replace("\n", " ")
+)

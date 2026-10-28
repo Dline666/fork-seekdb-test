@@ -162,6 +162,9 @@ public:
     return next_expr_operator_id_;
   }
   int init_operator_stats();
+  const common::ObIArray<uint64_t> &get_ai_column_read_refs() const { return ai_column_read_refs_; }
+  int set_ai_column_read_refs(const common::ObIArray<uint64_t> &refs)
+  { return ai_column_read_refs_.assign(refs); }
 
   inline void set_param_count(int64_t param_count) { param_count_ = param_count; }
   inline int64_t get_param_count() const { return param_count_; }
@@ -407,6 +410,7 @@ private:
    */
 
   //for fill_result_set
+  common::ObFixedArray<uint64_t, common::ObIAllocator> ai_column_read_refs_;
   common::ColumnsFieldArray field_columns_;
   common::ParamsFieldArray param_columns_;
   common::ObFixedArray<share::AutoincParam, common::ObIAllocator> autoinc_params_; //auto-increment param

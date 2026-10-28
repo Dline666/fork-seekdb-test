@@ -123,6 +123,16 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
         if (OB_FAIL(mock_values_column_ref(ref_expr))) {
         }
       }
+      if (OB_SUCC(ret) && !session_info_->is_ai_column_internal()) {
+        const ObColumnSchemaV2 *schema = nullptr;
+        const uint64_t table_id = OB_INVALID_ID == column->base_tid_ ? table->ref_id_ : column->base_tid_;
+        const uint64_t column_id = OB_INVALID_ID == column->base_cid_ ? column->column_id_ : column->base_cid_;
+        if (OB_FAIL(schema_checker_->get_column_schema(table_id, column_id, schema, true))) {
+        } else if (OB_NOT_NULL(schema) && schema->is_ai_column()) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "direct assignment to an AI COLUMN");
+        }
+      }
       // process expression
       if (OB_SUCC(ret)) {
         assignment.column_expr_ = column->expr_;
@@ -2199,7 +2209,14 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
           ret = OB_ERR_FIELD_SPECIFIED_TWICE;
           ObCStringHelper helper;
           LOG_USER_ERROR(OB_ERR_FIELD_SPECIFIED_TWICE, helper.convert(column_items.at(i).column_name_));
-        } else if (OB_FAIL(mock_values_column_ref(column_items.at(i).expr_))) {
+        } else {
+          const ObColumnSchemaV2 *schema = nullptr;
+          if (table_item->is_basic_table()
+              && OB_FAIL(schema_checker_->get_column_schema(table_item->ref_id_, column_id, schema, true))) {
+          } else if (nullptr != schema && schema->is_ai_column() && !session_info_->is_ai_column_internal()) {
+            // The implicit INSERT column list consists only of business inputs.
+          } else if (OB_FAIL(mock_values_column_ref(column_items.at(i).expr_))) {
+          }
         }
       }
     }
@@ -2221,6 +2238,23 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
           if (OB_FAIL(check_same_base_table(*table_item, *column_item->expr_))) {
           }
         }
+      }
+    }
+  }
+
+  if (OB_SUCC(ret) && nullptr != node && !session_info_->is_ai_column_internal()) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < table_info.values_desc_.count(); ++i) {
+      const ObColumnRefRawExpr *expr = table_info.values_desc_.at(i);
+      const ColumnItem *item = del_upd_stmt->get_column_item_by_id(expr->get_table_id(), expr->get_column_id());
+      const ObColumnSchemaV2 *schema = nullptr;
+      if (OB_ISNULL(item)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(schema_checker_->get_column_schema(
+          OB_INVALID_ID == item->base_tid_ ? table_item->ref_id_ : item->base_tid_,
+          OB_INVALID_ID == item->base_cid_ ? item->column_id_ : item->base_cid_, schema, true))) {
+      } else if (nullptr != schema && schema->is_ai_column()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "direct assignment to an AI COLUMN");
       }
     }
   }

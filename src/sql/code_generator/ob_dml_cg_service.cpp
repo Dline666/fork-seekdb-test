@@ -1371,6 +1371,11 @@ int ObDmlCgService::check_upd_need_all_columns(ObLogDelUpd &op,
     LOG_TRACE("update primary_table primary key, need all columns", K(table_schema->get_table_name_str()));
   }
 
+  if (OB_SUCC(ret) && is_primary_index) {
+    for (auto it = table_schema->column_begin(); it != table_schema->column_end(); ++it) {
+      if ((*it)->is_ai_column()) { need_all_columns = true; break; }
+    }
+  }
   return ret;
 }
 
@@ -2093,6 +2098,20 @@ int ObDmlCgService::generate_dml_base_ctdef(ObLogicalOperator &op,
                                             ObIArray<ObRawExpr*> &new_row)
 {
   int ret = OB_SUCCESS;
+  if (index_dml_info.is_primary_index_) {
+    const ObTableSchema *ai_table = nullptr;
+    if (OB_FAIL(cg_.opt_ctx_->get_schema_guard()->get_table_schema(index_dml_info.ref_table_id_, ai_table))) {
+    } else if (ai_table != nullptr) {
+      for (auto it = ai_table->column_begin(); it != ai_table->column_end(); ++it) {
+        if ((*it)->is_ai_column()) {
+          dml_base_ctdef.has_ai_columns_ = true;
+          cg_.phy_plan_->set_has_nested_sql(true);
+          cg_.phy_plan_->set_need_serial_exec(true);
+          break;
+        }
+      }
+    }
+  }
   dml_base_ctdef.is_primary_index_ = index_dml_info.is_primary_index_;
   dml_base_ctdef.is_vec_hnsw_index_vid_opt_ = index_dml_info.is_vec_hnsw_index_vid_opt_;
   dml_base_ctdef.column_ids_.set_capacity(index_dml_info.column_exprs_.count());

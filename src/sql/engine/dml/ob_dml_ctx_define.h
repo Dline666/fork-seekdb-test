@@ -434,6 +434,7 @@ public:
   static const int64_t MAX_ROWKEY_DISTINCT_BUCKET_NUM = 1 * 1024 * 1024;
   ExprFixedArray view_check_exprs_;
   bool is_primary_index_;
+  bool has_ai_columns_;
   bool is_table_without_pk_;
   bool reserved_advanced_trigger_;
   ObExpr *trans_info_expr_;
@@ -453,6 +454,7 @@ protected:
       das_base_ctdef_(das_base_ctdef),
       view_check_exprs_(alloc),
       is_primary_index_(false),
+      has_ai_columns_(false),
       is_table_without_pk_(false),
       reserved_advanced_trigger_(false),
       trans_info_expr_(nullptr),

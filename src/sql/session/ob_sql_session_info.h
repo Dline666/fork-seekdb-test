@@ -43,6 +43,7 @@
 
 namespace oceanbase
 {
+namespace transaction { class ObTxReadSnapshot; }
 namespace common
 {
 class ObISrsProvider;
@@ -589,6 +590,13 @@ public:
                          uint64_t id = OB_INVALID_ID);
   int print_all_cursor();
 
+  const transaction::ObTxReadSnapshot *get_ai_column_read_snapshot() const { return ai_column_read_snapshot_; }
+  void set_ai_column_read_snapshot(const transaction::ObTxReadSnapshot *snapshot) { ai_column_read_snapshot_ = snapshot; }
+  bool is_ai_column_internal() const { return ai_column_internal_; }
+  void set_ai_column_internal(bool value) { ai_column_internal_ = value; }
+  uint64_t get_ai_column_retry_id() const { return ai_column_retry_id_; }
+  void set_ai_column_retry_id(uint64_t value) { ai_column_retry_id_ = value; }
+
   inline common::sqlclient::ObISQLConnection *get_inner_conn() { return inner_conn_; }
   inline void set_inner_conn(common::sqlclient::ObISQLConnection *inner_conn)
   {
@@ -970,6 +978,9 @@ private:
   bool pl_ps_protocol_; // send query result use this protocol
 
   common::sqlclient::ObISQLConnection *inner_conn_;
+  const transaction::ObTxReadSnapshot *ai_column_read_snapshot_;
+  bool ai_column_internal_; // Kernel-only capability; never exposed as a SQL variable.
+  uint64_t ai_column_retry_id_; // Kernel-only forced outbox target for RETRY.
 
   ObSessionStat session_stat_;
 
