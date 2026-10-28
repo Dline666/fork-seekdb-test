@@ -4,7 +4,10 @@ add_library(oblib_pass INTERFACE)
 
 get_property(EASY_INCLUDE_DIRS GLOBAL PROPERTY "EASY_INCLUDE_DIRS" )
 
-if(OB_MACOS27)
+# Host Apple Clang 21 also ships on macOS 26; Boost 1.74 needs the same
+# enum-constant backport as the macOS 27 host-toolchain build.
+if(OB_MACOS27 OR (APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"
+                 AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 20))
   include("${CMAKE_SOURCE_DIR}/cmake/BoostCompat.cmake")
 endif()
 

@@ -30,11 +30,12 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   oblib_add_extra_objects(${CMAKE_CURRENT_BINARY_DIR}/zstd_1_3_8_objs.o)
   set_source_files_properties(zstd_1_3_8_objs.o PROPERTIES GENERATED TRUE)
   oblib_add_library(zstd_1_3_8 zstd_1_3_8_objs.o)
-elseif(OB_MACOS27)
-  # Darwin ld -r makes hidden (private extern) symbols local by default.
+elseif(APPLE)
+  # Darwin ld -r localizes private extern symbols on all supported macOS
+  # versions, not only macOS 27; no ELF-only objcopy step is needed.
   add_custom_command(
     OUTPUT zstd_1_3_8_objs.o
-    COMMAND "${OB_LD_BIN}" -arch "${ARCHITECTURE}" -r
+    COMMAND "${OB_LD_BIN}" ${ARCH_ARGS} ${OB_DEPLOY} -r
       $<TARGET_OBJECTS:zstd_1_3_8_objs> -o zstd_1_3_8_objs.o
     DEPENDS zstd_1_3_8_objs
     COMMAND_EXPAND_LISTS
