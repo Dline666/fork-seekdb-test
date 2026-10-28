@@ -3047,6 +3047,10 @@ int ObDMLResolver::infer_file_table_schema(ObFileTableDef &table_def)
     } else {
       table_def.file_size_ = identity.size;
       table_def.file_mtime_ns_ = identity.mtime_ns;
+      table_def.file_device_ = identity.device;
+      table_def.file_inode_ = identity.inode;
+      table_def.file_ctime_ns_ = identity.ctime_ns;
+      table_def.file_native_identity_ = identity.native_valid;
       table_def.row_count_ = row_count;
       for (size_t i = 0; OB_SUCC(ret) && i < columns.size(); ++i) {
         ObFileTableColumn column;

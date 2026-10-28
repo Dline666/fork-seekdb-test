@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -59,6 +60,17 @@ struct FileColumn
   bool nullable = true;
 };
 
+// Per-record/value/schema limits bound memory even for hostile local input.
+// SQL uses these defaults; embedders/tests may only lower them.
+struct FileScanLimits
+{
+  int64_t max_field_bytes = 16LL * 1024 * 1024;
+  int64_t max_record_bytes = 64LL * 1024 * 1024;
+  int64_t max_columns = 4096;
+  int64_t max_batch_rows = 65536;
+  int64_t max_batch_bytes = 64LL * 1024 * 1024;
+};
+
 // Options accepted by read_csv()/read_json()/read_parquet().
 struct FileScanOptions
 {
@@ -75,6 +87,7 @@ struct FileScanOptions
   std::string json_format;
   // Column indexes to read, empty means all columns.
   std::vector<int32_t> projection;
+  FileScanLimits limits;
 };
 
 // One value of a row.  Values are kept in a decoded, SQL-friendly form.
@@ -95,9 +108,15 @@ struct FileIdentity
   int64_t size = 0;
   int64_t mtime_ns = 0;
   bool valid = false;
+  uint64_t device = 0;
+  uint64_t inode = 0;
+  int64_t ctime_ns = 0;
+  bool native_valid = false;
   bool operator==(const FileIdentity &other) const
   {
-    return valid && other.valid && size == other.size && mtime_ns == other.mtime_ns;
+    return valid && other.valid && size == other.size && mtime_ns == other.mtime_ns
+        && (!(native_valid && other.native_valid)
+            || (device == other.device && inode == other.inode && ctime_ns == other.ctime_ns));
   }
   bool operator!=(const FileIdentity &other) const { return !(*this == other); }
 };
@@ -132,6 +151,9 @@ bool validate_file_path(const std::string &path,
                         std::string &resolved_path,
                         std::string &err);
 
+// Glob discovery is bounded and never follows a symlink while enumerating.
+int discover_files(const std::string &pattern, std::vector<std::string> &files, std::string &err);
+
 // Detects the format from the file extension.  Returns false for unsupported
 // extensions.
 bool detect_format_by_extension(const std::string &path, int32_t &format);
@@ -160,7 +182,13 @@ int infer_parquet_schema(const std::string &path,
 // Factory: creates a reader for the format described by options.format.
 FileBatchReader *create_file_reader(int32_t format);
 
-// Reads the file identity (size + last modification time).
+// POSIX opens walk every component without following symlinks, then require a
+// regular file. The returned handle is owned by the caller. Windows uses CRT.
+std::FILE *open_local_file_for_read(const std::string &path);
+int read_file_descriptor_identity(int fd, FileIdentity &identity);
+bool validate_scan_limits(const FileScanLimits &limits, std::string &err);
+
+// Reads size, timestamps and native file identity where supported.
 int read_file_identity(const std::string &path, FileIdentity &identity);
 
 // CSV/JSON writers used by COPY ... TO.

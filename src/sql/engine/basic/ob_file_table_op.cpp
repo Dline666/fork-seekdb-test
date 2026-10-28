@@ -67,6 +67,10 @@ OB_SERIALIZE_MEMBER((ObFileTableSpec, ObOpSpec),
                     sample_size_,
                     file_size_,
                     file_mtime_ns_,
+                    file_device_,
+                    file_inode_,
+                    file_ctime_ns_,
+                    file_native_identity_,
                     is_static_,
                     static_column_count_,
                     static_cells_);
@@ -102,7 +106,9 @@ int ObFileTableOp::init_reader()
   } else if (0 != file_sql::read_file_identity(path, identity)) {
     ret = OB_FILE_NOT_EXIST;
     LOG_WARN("failed to read file identity", K(ret), K(path.c_str()));
-  } else if (!(identity == file_sql::FileIdentity{MY_SPEC.file_size_, MY_SPEC.file_mtime_ns_, true})) {
+  } else if (!(identity == file_sql::FileIdentity{MY_SPEC.file_size_, MY_SPEC.file_mtime_ns_, true,
+                    MY_SPEC.file_device_, MY_SPEC.file_inode_, MY_SPEC.file_ctime_ns_,
+                    MY_SPEC.file_native_identity_})) {
     ret = OB_IO_ERROR;
     LOG_WARN("the file was modified after the schema was inferred", K(ret),
              K(path.c_str()), K(identity.size), K(identity.mtime_ns),

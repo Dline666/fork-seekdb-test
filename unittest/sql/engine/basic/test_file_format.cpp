@@ -165,11 +165,172 @@ static bool secure_glob_prefix() {
   CHECK(!validate_file_path((allowed/"*"/".."/"secret.csv").string(),allowed.string(),true,p,e));
   CHECK(!validate_file_path((root/"*"/"*.csv").string(),allowed.string(),true,p,e)); return true;
 }
+static bool strict_json_strings() {
+  const auto p=root/"strict-strings.jsonl";
+  const std::vector<std::string> invalid={
+    "{\"s\":\"raw\nnewline\"}\n", "{\"s\":\"raw\ttab\"}\n",
+    "{\"s\":\"\\uD800\"}\n", "{\"s\":\"\\uDC00\"}\n",
+    "{\"s\":\"\\uD800x\"}\n", "{\"s\":\"\\uD800\\u0041\"}\n",
+    std::string("{\"s\":\"")+char(0xC0)+char(0x80)+"\"}\n",
+    std::string("{\"s\":\"")+char(0xED)+char(0xA0)+char(0x80)+"\"}\n",
+    std::string("{\"s\":\"")+char(0xF4)+char(0x90)+char(0x80)+char(0x80)+"\"}\n"};
+  for(const auto &input:invalid) {
+    put(p,input); std::string e; std::vector<FileColumn> c; FileIdentity id;
+    CHECK(infer_json_schema(p.string(),{},c,id,e)!=0); CHECK(!e.empty());
+  }
+  put(p,"{\"s\":\"\\uD83D\\uDE00\\n\\t\"}\n");
+  FileScanOptions o; o.format=FILE_FORMAT_JSON; std::string e;
+  std::unique_ptr<FileBatchReader> r(create_file_reader(FILE_FORMAT_JSON)); CHECK(r->open(p.string(),o,e)==0);
+  std::vector<std::vector<Cell>> rows; CHECK(r->read_batch(1,rows,e)==0);
+  CHECK(rows.size()==1); CHECK(rows[0][0].str_value=="😀\n\t"); return true;
+}
+static bool strict_json_numbers() {
+  const auto p=root/"strict-numbers.jsonl";
+  for(const std::string &v:{"+1",".1","1.","01","-01","-.2","1e","1e+","00.1"}) {
+    put(p,"{\"n\":"+v+"}\n"); std::string e; std::vector<FileColumn> c; FileIdentity id;
+    CHECK(infer_json_schema(p.string(),{},c,id,e)!=0);
+  }
+  for(const std::string &v:{"0","-0","0.1","-0.1","1e+2","1.23e-2"}) {
+    put(p,"{\"n\":"+v+"}\n"); std::string e; std::vector<FileColumn> c; FileIdentity id;
+    CHECK(infer_json_schema(p.string(),{},c,id,e)==0);
+  }
+  return true;
+}
+static bool csv_utf8_validation() {
+  const auto p=root/"invalid-utf8.csv";
+  for(const std::string &v:{std::string(1,char(0x80)),std::string(1,char(0xC2)),std::string("\xF0\x80\x80\x80",4)}) {
+    put(p,"value\n"+v+"\n"); std::string e; std::vector<FileColumn> c; FileIdentity id;
+    CHECK(infer_csv_schema(p.string(),{},c,id,e)!=0); CHECK(e.find("UTF-8")!=std::string::npos);
+  }
+  return true;
+}
+static bool field_and_record_limits() {
+  const auto p=root/"limited.csv"; std::string e; std::vector<FileColumn> c; FileIdentity id;
+  FileScanOptions o; o.limits.max_field_bytes=4; o.limits.max_record_bytes=64;
+  put(p,"col\n1234\n"); CHECK(infer_csv_schema(p.string(),o,c,id,e)==0);
+  put(p,"col\n\"1234\"\n"); CHECK(infer_csv_schema(p.string(),o,c,id,e)==0);
+  put(p,"col\n12345\n"); CHECK(infer_csv_schema(p.string(),o,c,id,e)!=0); CHECK(e.find("limit")!=std::string::npos);
+  put(p,"col\n\"12\"\"34\"\n"); CHECK(infer_csv_schema(p.string(),o,c,id,e)!=0);
+  o.limits.max_field_bytes=64; o.limits.max_record_bytes=8;
+  put(p,"a,b\n1234,5678\n"); CHECK(infer_csv_schema(p.string(),o,c,id,e)!=0); CHECK(e.find("record")!=std::string::npos);
+  const auto j=root/"limited.jsonl"; o.format=FILE_FORMAT_JSON; o.limits.max_field_bytes=4; o.limits.max_record_bytes=64;
+  put(j,"{\"s\":\"1234\"}\n"); CHECK(infer_json_schema(j.string(),o,c,id,e)==0);
+  put(j,"{\"s\":\"12345\"}\n"); CHECK(infer_json_schema(j.string(),o,c,id,e)!=0);
+  put(j,"{\"s\":\"\\uD83D\\uDE00x\"}\n"); CHECK(infer_json_schema(j.string(),o,c,id,e)!=0);
+  put(j,"{\"n\":12345}\n"); CHECK(infer_json_schema(j.string(),o,c,id,e)!=0);
+  o.limits.max_field_bytes=64; o.limits.max_record_bytes=10;
+  put(j,"{\"s\":\"long record\"}\n"); CHECK(infer_json_schema(j.string(),o,c,id,e)!=0); CHECK(e.find("record")!=std::string::npos);
+  return true;
+}
+static bool schema_column_limits() {
+  const auto p=root/"wide.csv", j=root/"wide.jsonl"; std::string e; std::vector<FileColumn> c; FileIdentity id;
+  FileScanOptions o; o.limits.max_columns=2;
+  put(p,"a,b,c\n1,2,3\n"); CHECK(infer_csv_schema(p.string(),o,c,id,e)!=0); CHECK(e.find("column")!=std::string::npos);
+  put(j,"{\"a\":1,\"b\":2,\"c\":3}\n"); CHECK(infer_json_schema(j.string(),o,c,id,e)!=0);
+  put(j,"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n"); CHECK(infer_json_schema(j.string(),o,c,id,e)!=0); CHECK(e.find("union")!=std::string::npos);
+  o.limits.max_columns=0; put(p,"a\n1\n"); CHECK(infer_csv_schema(p.string(),o,c,id,e)!=0);
+  o.limits=FileScanLimits(); ++o.limits.max_field_bytes; CHECK(infer_csv_schema(p.string(),o,c,id,e)!=0);
+  return true;
+}
+static bool schema_metadata_limits() {
+  const auto p=root/"schema-metadata.jsonl"; std::string e; std::vector<FileColumn> c; FileIdentity id;
+  FileScanOptions o; o.limits.max_record_bytes=10;
+  put(p,"{\"abc\":1}\n{\"def\":2}\n");
+  CHECK(infer_json_schema(p.string(),o,c,id,e)!=0);
+  CHECK(c.empty()); CHECK(e.find("metadata")!=std::string::npos);
+  o.limits.max_record_bytes=12;
+  CHECK(infer_json_schema(p.string(),o,c,id,e)==0); CHECK(c.size()==2);
+  return true;
+}
+static bool csv_json_sample_size_contract() {
+  const auto csv=root/"sample-size.csv"; const auto json=root/"sample-size.jsonl";
+  put(csv,"id\n1\n"); put(json,"{\"id\":1}\n");
+  FileScanOptions o; o.sample_size=1; std::string e; std::vector<FileColumn> c; FileIdentity id;
+  CHECK(infer_csv_schema(csv.string(),o,c,id,e)!=0); CHECK(e.find("sample_size")!=std::string::npos);
+  o.format=FILE_FORMAT_JSON; CHECK(infer_json_schema(json.string(),o,c,id,e)!=0); CHECK(e.find("sample_size")!=std::string::npos);
+  return true;
+}
+static bool batch_memory_limits() {
+  const auto p=root/"batch-limit.csv",j=root/"batch-limit.jsonl"; std::string e;
+  put(p,"a\n1\n2\n3\n"); FileScanOptions o; o.limits.max_batch_rows=2;
+  std::unique_ptr<FileBatchReader> r(create_file_reader(FILE_FORMAT_CSV)); CHECK(r->open(p.string(),o,e)==0);
+  std::vector<std::vector<Cell>> rows; CHECK(r->read_batch(1000000,rows,e)==0); CHECK(rows.size()==2);
+  rows.clear(); CHECK(r->read_batch(1000000,rows,e)==0); CHECK(rows.size()==1);
+  o.limits.max_batch_bytes=1; CHECK(r->open(p.string(),o,e)==0); rows.clear(); CHECK(r->read_batch(1,rows,e)==FileBatchReader::FAILED); CHECK(rows.empty());
+  put(j,"{\"a\":1}\n");o.format=FILE_FORMAT_JSON;std::unique_ptr<FileBatchReader> jr(create_file_reader(FILE_FORMAT_JSON)); CHECK(jr->open(j.string(),o,e)==0); rows.clear(); CHECK(jr->read_batch(1,rows,e)==FileBatchReader::FAILED); CHECK(rows.empty());
+  return true;
+}
+static bool same_size_replacement_detected() {
+  const auto p=root/"replaced.csv",replacement=root/"replacement.csv"; put(p,"id\n1\n2\n"); std::string e;
+  const auto stamp=fs::last_write_time(p); std::unique_ptr<FileBatchReader> r(create_file_reader(FILE_FORMAT_CSV)); CHECK(r->open(p.string(),{},e)==0);
+  std::vector<std::vector<Cell>> rows; CHECK(r->read_batch(1,rows,e)==0);
+  put(replacement,"id\n8\n9\n");fs::last_write_time(replacement,stamp);fs::rename(replacement,p);
+  rows.clear(); CHECK(r->read_batch(1,rows,e)==FileBatchReader::FAILED); CHECK(rows.empty());
+  return true;
+}
+static bool same_size_inplace_write_detected() {
+  const auto p=root/"rewritten.jsonl"; put(p,"{\"id\":1}\n{\"id\":2}\n"); const auto stamp=fs::last_write_time(p);
+  FileScanOptions o; o.format=FILE_FORMAT_JSON; std::string e;
+  std::unique_ptr<FileBatchReader> r(create_file_reader(FILE_FORMAT_JSON)); CHECK(r->open(p.string(),o,e)==0);
+  std::vector<std::vector<Cell>> rows; CHECK(r->read_batch(1,rows,e)==0);
+  put(p,"{\"id\":8}\n{\"id\":9}\n");fs::last_write_time(p,stamp);rows.clear(); CHECK(r->read_batch(1,rows,e)==FileBatchReader::FAILED); CHECK(rows.empty()); return true;
+}
+static bool safe_open_rejects_symlink_components() {
+  const auto d=root/"safe-open",inside=d/"inside";fs::create_directories(inside);put(inside/"data.csv","a\n1\n");
+  fs::create_directory_symlink(inside,d/"dir-link");fs::create_symlink(inside/"data.csv",d/"file-link");
+  std::FILE *fp=open_local_file_for_read((inside/"data.csv").string());CHECK(fp!=nullptr);std::fclose(fp);
+  CHECK(open_local_file_for_read((d/"dir-link"/"data.csv").string())==nullptr);
+  CHECK(open_local_file_for_read((d/"file-link").string())==nullptr);
+  CHECK(open_local_file_for_read((inside/".."/"inside"/"data.csv").string())==nullptr);
+  CHECK(open_local_file_for_read(inside.string())==nullptr);
+  return true;
+}
+static bool csv_single_null_records() {
+  const auto p=root/"single-null.csv"; put(p,"value\r\n\r\n\"\"\r\nx\r\n");std::string e;
+  std::unique_ptr<FileBatchReader> r(create_file_reader(FILE_FORMAT_CSV));CHECK(r->open(p.string(),{},e)==0);
+  std::vector<std::vector<Cell>> rows;CHECK(r->read_batch(8,rows,e)==0);CHECK(rows.size()==3);
+  CHECK(rows[0][0].is_null);CHECK(!rows[1][0].is_null);CHECK(rows[1][0].str_value.empty());CHECK(rows[2][0].str_value=="x");
+  const auto exported=root/"single-null-export.csv";std::unique_ptr<FileBatchWriter> w(create_csv_writer({}));CHECK(w->open(exported.string(),e)==0);
+  CHECK(w->write_row({Cell()},e)==0);CHECK(w->write_row({text("")},e)==0);CHECK(w->close(e)==0);
+  FileScanOptions o;o.header=false;CHECK(r->open(exported.string(),o,e)==0);rows.clear();CHECK(r->read_batch(8,rows,e)==0);CHECK(rows.size()==2);CHECK(rows[0][0].is_null);CHECK(!rows[1][0].is_null);return true;
+}
+static bool exact_field_limit_crlf() {
+  const auto p=root/"exact-crlf.csv";put(p,"name\r\n1234\r\n");FileScanOptions o;o.limits.max_field_bytes=4;
+  std::string e;std::vector<FileColumn> c;FileIdentity id;CHECK(infer_csv_schema(p.string(),o,c,id,e)==0);return true;
+}
+static bool glob_safe_enumeration() {
+  const auto d=root/"glob-scan";fs::create_directories(d/"nested");put(d/"one.csv","");put(d/"two.json","");put(d/"nested"/"three.csv","");put(d/".hidden.csv","");
+  std::string e;std::vector<std::string> files;
+  CHECK(discover_files((d/"*.csv").string(),files,e)==0);CHECK(files.size()==1);CHECK(files[0]==(d/"one.csv").string());
+  CHECK(discover_files((d/"*"/"*.csv").string(),files,e)==0);CHECK(files.size()==1);CHECK(files[0]==(d/"nested"/"three.csv").string());
+  fs::create_directory_symlink(root,d/"linked");CHECK(discover_files((d/"*"/"*.csv").string(),files,e)!=0);CHECK(files.empty());CHECK(e.find("symbolic")!=std::string::npos);
+  fs::remove(d/"linked");fs::create_symlink(d/"one.csv",d/"link.csv");CHECK(discover_files((d/"*.csv").string(),files,e)!=0);CHECK(files.empty());
+  std::string depth=d.string();for(int i=0;i<70;++i)depth+="/a";depth+="/*.csv";CHECK(discover_files(depth,files,e)!=0);CHECK(e.find("depth")!=std::string::npos);return true;
+}
+static bool glob_match_limit() {
+  const auto d=root/"glob-limit";fs::create_directory(d);
+  for(int i=0;i<10001;++i)put(d/(std::to_string(i)+".csv"),"");
+  std::string e;std::vector<std::string> files;CHECK(discover_files((d/"*.csv").string(),files,e)!=0);CHECK(files.empty());CHECK(e.find("limit")!=std::string::npos);return true;
+}
+static bool parquet_reader_resource_limits() {
+  const auto p=root/"parquet-limit.parquet";put(p,get(fixture));FileScanOptions o;o.format=FILE_FORMAT_PARQUET;o.limits.max_batch_rows=2;
+  std::string e;std::unique_ptr<FileBatchReader> r(create_file_reader(FILE_FORMAT_PARQUET));CHECK(r->open(p.string(),o,e)==0);
+  std::vector<std::vector<Cell>> rows;CHECK(r->read_batch(1000000,rows,e)==0);CHECK(rows.size()==2);
+  o.limits.max_batch_bytes=1;CHECK(r->open(p.string(),o,e)==0);rows.clear();CHECK(r->read_batch(1,rows,e)==FileBatchReader::FAILED);CHECK(rows.empty());CHECK(e.find("limit")!=std::string::npos);
+  o.limits=FileScanLimits();o.limits.max_record_bytes=1;CHECK(r->open(p.string(),o,e)==0);rows.clear();CHECK(r->read_batch(1,rows,e)==FileBatchReader::FAILED);return true;
+}
+static bool parquet_same_size_replacement() {
+  const auto p=root/"parquet-replace.parquet",replacement=root/"parquet-new.parquet";put(p,get(fixture));const auto stamp=fs::last_write_time(p);
+  FileScanOptions o;o.format=FILE_FORMAT_PARQUET;std::string e;std::unique_ptr<FileBatchReader> r(create_file_reader(FILE_FORMAT_PARQUET));CHECK(r->open(p.string(),o,e)==0);
+  std::vector<std::vector<Cell>> rows;CHECK(r->read_batch(1,rows,e)==0);put(replacement,get(fixture));fs::last_write_time(replacement,stamp);fs::rename(replacement,p);
+  rows.clear();CHECK(r->read_batch(1,rows,e)==FileBatchReader::FAILED);CHECK(rows.empty());return true;
+}
 int main(int argc,char **argv) {
   if(argc!=3) return 2; root=fs::absolute(argv[1]); fixture=fs::absolute(argv[2]); std::error_code ec;
   if(!fs::create_directory(root,ec)) { std::cerr<<"test directory must not exist\n"; return 2; }
+  root=fs::canonical(root); fixture=fs::canonical(fixture);
   int failed=0;
 #define RUN(t) do { bool ok=t(); std::cout<<#t<<": "<<(ok?"PASS":"FAIL")<<"\n"; failed+=!ok; } while(0)
-  RUN(existing_target); RUN(preexisting_temporary_file); RUN(temporary_symlink); RUN(target_created_during_export); RUN(concurrent_writers); RUN(abort_removes_only_owned_temporary); RUN(csv_roundtrip); RUN(malformed_csv_suffix); RUN(unterminated_csv_escape); RUN(json_trailing_comma); RUN(json_union); RUN(csv_column_count); RUN(changed_csv_scan); RUN(changed_json_scan); RUN(reader_reopen); RUN(parquet_scan); RUN(changed_parquet_scan); RUN(secure_path_confinement); RUN(secure_symlink_escape); RUN(secure_glob_prefix);
+  RUN(existing_target); RUN(preexisting_temporary_file); RUN(temporary_symlink); RUN(target_created_during_export); RUN(concurrent_writers); RUN(abort_removes_only_owned_temporary); RUN(csv_roundtrip); RUN(malformed_csv_suffix); RUN(unterminated_csv_escape); RUN(json_trailing_comma); RUN(json_union); RUN(csv_column_count); RUN(changed_csv_scan); RUN(changed_json_scan); RUN(reader_reopen); RUN(parquet_scan); RUN(changed_parquet_scan); RUN(secure_path_confinement); RUN(secure_symlink_escape); RUN(secure_glob_prefix); RUN(strict_json_strings); RUN(strict_json_numbers); RUN(csv_utf8_validation); RUN(field_and_record_limits); RUN(schema_column_limits); RUN(schema_metadata_limits); RUN(csv_json_sample_size_contract); RUN(batch_memory_limits); RUN(same_size_replacement_detected); RUN(same_size_inplace_write_detected); RUN(safe_open_rejects_symlink_components); RUN(csv_single_null_records); RUN(exact_field_limit_crlf); RUN(glob_safe_enumeration); RUN(glob_match_limit); RUN(parquet_reader_resource_limits); RUN(parquet_same_size_replacement);
   fs::remove_all(root,ec); std::cout<<"failed="<<failed<<"\n"; return failed?1:0;
 }

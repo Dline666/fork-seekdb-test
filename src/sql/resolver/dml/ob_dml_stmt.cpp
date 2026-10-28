@@ -169,6 +169,10 @@ int ObFileTableDef::deep_copy(const ObFileTableDef &src, ObIAllocator &allocator
   sample_size_ = src.sample_size_;
   file_size_ = src.file_size_;
   file_mtime_ns_ = src.file_mtime_ns_;
+  file_device_ = src.file_device_;
+  file_inode_ = src.file_inode_;
+  file_ctime_ns_ = src.file_ctime_ns_;
+  file_native_identity_ = src.file_native_identity_;
   row_count_ = src.row_count_;
   is_static_ = src.is_static_;
   static_column_count_ = src.static_column_count_;

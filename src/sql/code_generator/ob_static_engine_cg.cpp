@@ -5490,6 +5490,7 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       spec.parallel_ = op.get_parallel();
       spec.is_overwrite_ = op.get_is_overwrite();
       spec.has_header_ = op.get_has_header();
+      spec.is_copy_ = op.get_is_copy();
       if (OB_FAIL(ob_write_string(alloc, op.get_null_str(), spec.null_str_))) {
       } else if (OB_FAIL(ob_write_string(alloc, op.get_header_line(), spec.header_line_))) {
       }
@@ -5582,6 +5583,10 @@ int ObStaticEngineCG::generate_spec(ObLogFileTable &op, ObFileTableSpec &spec,
     spec.sample_size_ = def->sample_size_;
     spec.file_size_ = def->file_size_;
     spec.file_mtime_ns_ = def->file_mtime_ns_;
+    spec.file_device_ = def->file_device_;
+    spec.file_inode_ = def->file_inode_;
+    spec.file_ctime_ns_ = def->file_ctime_ns_;
+    spec.file_native_identity_ = def->file_native_identity_;
     spec.is_static_ = def->is_static_;
     spec.static_column_count_ = def->static_column_count_;
     for (int64_t i = 0; OB_SUCC(ret) && i < def->static_cells_.count(); ++i) {

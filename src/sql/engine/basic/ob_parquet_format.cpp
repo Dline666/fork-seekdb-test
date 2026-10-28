@@ -27,6 +27,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 namespace oceanbase
 {
@@ -43,7 +46,7 @@ namespace
 // allocate an unbounded amount of memory.
 // ---------------------------------------------------------------------------
 const int64_t PQ_MAX_ALLOC_BYTES = 256LL * 1024 * 1024;      // one page / chunk buffer
-const int64_t PQ_MAX_LIST_ELEMENTS = 64LL * 1024 * 1024;     // metadata list length
+const int64_t PQ_MAX_LIST_ELEMENTS = 65536;     // metadata list length
 const int64_t PQ_MAX_DICT_VALUES = 2LL * 1024 * 1024;        // decoded dictionary entries
 const int64_t PQ_MAX_PAGE_VALUES = 2LL * 1024 * 1024;        // values in one data page
 const int64_t PQ_MAX_BATCH_ROWS = 65536;                     // internal decode granularity
@@ -1747,68 +1750,72 @@ public:
   int open(const std::string &path, std::string &err)
   {
     close();
-    in_.open(path.c_str(), std::ios::in | std::ios::binary);
-    if (!in_.is_open()) {
-      err = "parquet: cannot open file '" + path + "'";
-      return -1;
+    fp_ = open_local_file_for_read(path);
+    if (fp_ == nullptr) { err = "parquet: cannot safely open file: " + path; return -1; }
+#ifndef _WIN32
+    if (read_file_descriptor_identity(fileno(fp_), identity_) != 0) {
+      err = "parquet: cannot identify opened file"; close(); return -1;
     }
-    in_.seekg(0, std::ios::end);
-    const std::streamoff end = in_.tellg();
-    if (end < 0) {
-      err = "parquet: cannot determine the size of file '" + path + "'";
-      close();
-      return -1;
-    }
-    size_ = static_cast<int64_t>(end);
+#else
+    if (read_file_identity(path, identity_) != 0) { close(); return -1; }
+#endif
+    size_ = identity_.size;
     path_ = path;
-    return 0;
+    return check_identity(err) ? 0 : -1;
   }
 
   void close()
   {
-    if (in_.is_open()) {
-      in_.close();
-    }
+    if (fp_ != nullptr) std::fclose(fp_);
+    fp_ = nullptr;
     size_ = 0;
     path_.clear();
+    identity_ = FileIdentity();
   }
 
   int64_t size() const { return size_; }
   const std::string &path() const { return path_; }
+  bool check_identity(std::string &err) const
+  {
+    FileIdentity current;
+    if (fp_ == nullptr || read_file_identity(path_, current) != 0 || current != identity_) {
+      err = "parquet: file changed during scan: " + path_; return false;
+    }
+#ifndef _WIN32
+    if (read_file_descriptor_identity(fileno(fp_), current) != 0 || current != identity_) {
+      err = "parquet: opened file changed during scan: " + path_; return false;
+    }
+#endif
+    return true;
+  }
 
   int read_at(int64_t offset, int64_t len, std::vector<uint8_t> &out, std::string &err) const
   {
     out.clear();
-    if (len < 0 || len > PQ_MAX_ALLOC_BYTES) {
-      err = "parquet: read size out of range";
-      return -1;
-    }
-    if (len == 0) {
-      return 0;
-    }
+    if (len < 0 || len > PQ_MAX_ALLOC_BYTES) { err = "parquet: read size out of range"; return -1; }
+    if (len == 0) return 0;
     if (offset < 0 || offset > size_ || len > size_ - offset) {
-      err = "parquet: read past the end of the file";
-      return -1;
+      err = "parquet: read past the end of the file"; return -1;
     }
+    if (!check_identity(err)) return -1;
     out.resize(static_cast<size_t>(len));
-    in_.clear();
-    in_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-    if (!in_.good()) {
-      err = "parquet: failed to seek in file";
-      return -1;
+#ifdef _WIN32
+    const int seek = ::_fseeki64(fp_, offset, SEEK_SET);
+#else
+    const int seek = ::fseeko(fp_, static_cast<off_t>(offset), SEEK_SET);
+#endif
+    if (seek != 0) { err = "parquet: failed to seek in file"; return -1; }
+    if (std::fread(out.data(), 1, out.size(), fp_) != out.size()) {
+      err = "parquet: short read or I/O error"; return -1;
     }
-    in_.read(reinterpret_cast<char *>(out.data()), static_cast<std::streamsize>(len));
-    if (in_.gcount() != static_cast<std::streamsize>(len)) {
-      err = "parquet: short read";
-      return -1;
-    }
-    return 0;
+    return check_identity(err) ? 0 : -1;
   }
 
 private:
-  mutable std::ifstream in_;
+  std::FILE *fp_ = nullptr;
   int64_t size_ = 0;
   std::string path_;
+  FileIdentity identity_;
 };
 
 // ---------------------------------------------------------------------------
@@ -2310,6 +2317,36 @@ struct PqColumnState
   std::vector<Cell> dictionary;
   std::vector<Cell> values;
   size_t head = 0;
+  int64_t *shared_bytes = nullptr;
+  FileScanLimits limits;
+  int64_t value_bytes = 0;
+  int64_t dictionary_bytes = 0;
+
+  bool append(Cell &cell, bool dictionary_value, std::string &err)
+  {
+    const int64_t bytes = static_cast<int64_t>(sizeof(Cell)) + cell.str_value.size();
+    if (shared_bytes == nullptr || cell.str_value.size() > static_cast<size_t>(limits.max_field_bytes)
+        || bytes > limits.max_batch_bytes - *shared_bytes) {
+      err = "parquet: decoded page/dictionary memory limit exceeded";
+      return false;
+    }
+    *shared_bytes += bytes;
+    if (dictionary_value) {
+      dictionary_bytes += bytes;
+      dictionary.push_back(std::move(cell));
+    } else {
+      value_bytes += bytes;
+      values.push_back(std::move(cell));
+    }
+    return true;
+  }
+
+  void clear_dictionary()
+  {
+    if (shared_bytes != nullptr) *shared_bytes -= dictionary_bytes;
+    dictionary_bytes = 0;
+    std::vector<Cell>().swap(dictionary);
+  }
 
   int64_t available() const { return static_cast<int64_t>(values.size() - head); }
 
@@ -2320,10 +2357,11 @@ struct PqColumnState
     }
     head += static_cast<size_t>(count);
     if (head >= values.size()) {
-      values.clear();
-      head = 0;
-    } else if (head >= 4096 && head * 2 >= values.size()) {
-      values.erase(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(head));
+      if (shared_bytes != nullptr) *shared_bytes -= value_bytes;
+      value_bytes = 0;
+      // Release capacity as well: retaining a large page in every projected
+      // column would bypass the reader-wide budget across subsequent batches.
+      std::vector<Cell>().swap(values);
       head = 0;
     }
   }
@@ -2456,12 +2494,12 @@ int pq_decode_levels_v1(const uint8_t *page,
 // Value decoding for one data page.  Nulls are interleaved with the decoded
 // values so that every column produces one entry per row slot.
 // ---------------------------------------------------------------------------
-void pq_append_null_cell(PqColumnState &state)
+bool pq_append_null_cell(PqColumnState &state, std::string &err)
 {
   Cell cell;
   cell.is_null = true;
   cell.type = state.file_type;
-  state.values.push_back(std::move(cell));
+  return state.append(cell, false, err);
 }
 
 int pq_decode_values(PqColumnState &state,
@@ -2493,14 +2531,14 @@ int pq_decode_values(PqColumnState &state,
     iterator.init_plain(leaf, values_data, values_len);
     for (int64_t i = 0; i < num_values; ++i) {
       if (has_levels && def_levels[static_cast<size_t>(i)] < static_cast<uint32_t>(max_def_level)) {
-        pq_append_null_cell(state);
+        if (!pq_append_null_cell(state, err)) return -1;
       } else {
         Cell cell;
         if (!iterator.next(cell)) {
           err = iterator.error();
           return -1;
         }
-        state.values.push_back(std::move(cell));
+        if (!state.append(cell, false, err)) return -1;
       }
     }
   } else if (encoding == PQ_ENC_PLAIN_DICTIONARY || encoding == PQ_ENC_RLE_DICTIONARY) {
@@ -2521,14 +2559,14 @@ int pq_decode_values(PqColumnState &state,
     iterator.init_dict(leaf, state.dictionary, values_data + 1, values_len - 1, width);
     for (int64_t i = 0; i < num_values; ++i) {
       if (has_levels && def_levels[static_cast<size_t>(i)] < static_cast<uint32_t>(max_def_level)) {
-        pq_append_null_cell(state);
+        if (!pq_append_null_cell(state, err)) return -1;
       } else {
         Cell cell;
         if (!iterator.next(cell)) {
           err = iterator.error();
           return -1;
         }
-        state.values.push_back(std::move(cell));
+        if (!state.append(cell, false, err)) return -1;
       }
     }
   } else if (encoding == PQ_ENC_RLE && leaf.physical_type == PQ_PHYS_BOOLEAN) {
@@ -2545,7 +2583,7 @@ int pq_decode_values(PqColumnState &state,
     decoder.init(values_data + 4, len, 1);
     for (int64_t i = 0; i < num_values; ++i) {
       if (has_levels && def_levels[static_cast<size_t>(i)] < static_cast<uint32_t>(max_def_level)) {
-        pq_append_null_cell(state);
+        if (!pq_append_null_cell(state, err)) return -1;
       } else {
         uint32_t value = 0;
         if (!decoder.next(value)) {
@@ -2555,7 +2593,7 @@ int pq_decode_values(PqColumnState &state,
         Cell cell;
         pq_reset_cell(cell, FILE_COL_BOOLEAN);
         cell.bool_value = value != 0;
-        state.values.push_back(std::move(cell));
+        if (!state.append(cell, false, err)) return -1;
       }
     }
   } else {
@@ -2599,7 +2637,7 @@ int pq_load_footer(PqFileReader &file,
     err = "parquet: invalid footer length in file '" + path + "'";
     return -1;
   }
-  if (footer_len > PQ_MAX_ALLOC_BYTES) {
+  if (footer_len > FileScanLimits().max_record_bytes) {
     err = "parquet: footer is too large";
     return -1;
   }
@@ -2645,6 +2683,7 @@ public:
     close_file();
     path_ = path;
     options_ = options;
+    if (!validate_scan_limits(options.limits, err)) return FAILED;
     FileIdentity before;
     if (read_file_identity(path, before) != 0) {
       err = "parquet: cannot read the file identity: " + path;
@@ -2691,11 +2730,13 @@ public:
     if (!check_identity(err)) {
       return FAILED;
     }
+    max_rows = std::min(max_rows, options_.limits.max_batch_rows);
     if (max_rows <= 0) {
       return SUCCESS;
     }
     const size_t start_size = rows.size();
     int64_t emitted = 0;
+    int64_t batch_bytes = 0;
     for (;;) {
       if (row_group_index_ >= meta_.row_groups.size()) {
         break;
@@ -2733,7 +2774,14 @@ public:
           row.reserve(states_.size());
           for (size_t c = 0; c < states_.size(); ++c) {
             PqColumnState &state = states_[c];
-            row.push_back(state.values[state.head + static_cast<size_t>(r)]);
+            const Cell &cell = state.values[state.head + static_cast<size_t>(r)];
+            const int64_t bytes = static_cast<int64_t>(sizeof(Cell)) + cell.str_value.size();
+            if (cell.str_value.size() > static_cast<size_t>(options_.limits.max_field_bytes)
+                || bytes > options_.limits.max_batch_bytes - batch_bytes) {
+              err = "parquet: scan value or batch memory limit exceeded"; return FAILED;
+            }
+            batch_bytes += bytes;
+            row.push_back(cell);
           }
           rows.push_back(std::move(row));
         }
@@ -2754,6 +2802,7 @@ public:
       ++row_group_index_;
       row_group_ready_ = false;
       states_.clear();
+      decoded_bytes_ = 0;
     }
     if (!check_identity(err)) {
       return FAILED;
@@ -2768,7 +2817,7 @@ private:
   bool check_identity(std::string &err) const
   {
     FileIdentity current;
-    if (read_file_identity(path_, current) != 0 || current != identity_) {
+    if (!file_.check_identity(err) || read_file_identity(path_, current) != 0 || current != identity_) {
       err = "parquet: file changed during scan: " + path_;
       return false;
     }
@@ -2782,6 +2831,7 @@ private:
     columns_.clear();
     projection_.clear();
     states_.clear();
+    decoded_bytes_ = 0;
     identity_ = FileIdentity();
     row_group_index_ = 0;
     row_group_ready_ = false;
@@ -2792,6 +2842,9 @@ private:
   {
     projection_.clear();
     const int64_t leaf_count = static_cast<int64_t>(meta_.leaves.size());
+    if (leaf_count > options_.limits.max_columns) {
+      err = "parquet: schema column limit exceeded"; return -1;
+    }
     if (options_.projection.empty()) {
       for (int64_t i = 0; i < leaf_count; ++i) {
         projection_.push_back(static_cast<int32_t>(i));
@@ -2838,10 +2891,13 @@ private:
   {
     const PqRowGroupMeta &row_group = meta_.row_groups[row_group_index_];
     states_.clear();
+    decoded_bytes_ = 0;
     states_.resize(projection_.size());
     for (size_t i = 0; i < projection_.size(); ++i) {
       const int32_t leaf_index = projection_[i];
       PqColumnState &state = states_[i];
+      state.shared_bytes = &decoded_bytes_;
+      state.limits = options_.limits;
       state.leaf_index = leaf_index;
       state.leaf = &meta_.leaves[static_cast<size_t>(leaf_index)];
       state.chunk = &row_group.columns[static_cast<size_t>(leaf_index)];
@@ -2927,7 +2983,9 @@ private:
         return -1;
       }
       if (header.compressed_page_size < 0 ||
-          header.compressed_page_size > PQ_MAX_ALLOC_BYTES) {
+          header.compressed_page_size > options_.limits.max_record_bytes
+          || header.uncompressed_page_size < 0
+          || header.uncompressed_page_size > options_.limits.max_record_bytes) {
         err = "parquet: page size is out of range";
         return -1;
       }
@@ -3004,14 +3062,14 @@ private:
     }
     PqValueIterator iterator;
     iterator.init_plain(*state.leaf, decompressed.data(), static_cast<int64_t>(decompressed.size()));
-    state.dictionary.clear();
+    state.clear_dictionary();
     for (int64_t i = 0; i < header.dict_num_values; ++i) {
       Cell cell;
       if (!iterator.next(cell)) {
         err = iterator.error();
         return -1;
       }
-      state.dictionary.push_back(std::move(cell));
+      if (!state.append(cell, true, err)) return -1;
     }
     state.has_dictionary = true;
     return 0;
@@ -3136,6 +3194,7 @@ private:
   std::vector<FileColumn> columns_;
   std::vector<int32_t> projection_;
   std::vector<PqColumnState> states_;
+  int64_t decoded_bytes_ = 0;
   FileIdentity identity_;
   size_t row_group_index_ = 0;
   bool row_group_ready_ = false;
@@ -3150,8 +3209,8 @@ int infer_parquet_schema(const std::string &path,
                          FileIdentity &identity,
                          std::string &err)
 {
-  (void)options;
   err.clear();
+  if (!validate_scan_limits(options.limits, err)) return -1;
   columns.clear();
   identity = FileIdentity();
   FileIdentity before;
@@ -3166,6 +3225,9 @@ int infer_parquet_schema(const std::string &path,
   PqFileMeta meta;
   if (pq_load_footer(file, path, meta, err) != 0) {
     return -1;
+  }
+  if (meta.leaves.size() > static_cast<size_t>(options.limits.max_columns)) {
+    err = "parquet: schema column limit exceeded"; return -1;
   }
   if (pq_build_file_columns(meta, columns, err) != 0) {
     return -1;

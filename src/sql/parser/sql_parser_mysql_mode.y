@@ -17639,6 +17639,24 @@ COPY '(' select_stmt ')' TO STRING_VALUE copy_opt_tail
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_STMT, 3, $3, $6, $7);
 }
+| COPY relation_factor TO STRING_VALUE copy_opt_tail
+{
+  // A table export is the ordinary SELECT * FROM table execution plan.
+  ParseNode *star = NULL;
+  ParseNode *project = NULL;
+  ParseNode *project_list = NULL;
+  ParseNode *from_list = NULL;
+  ParseNode *select_node = NULL;
+  malloc_terminal_node(star, result->malloc_pool_, T_STAR);
+  malloc_non_terminal_node(project, result->malloc_pool_, T_PROJECT_STRING, 1, star);
+  dup_string_to_node(project, result->malloc_pool_, "*");
+  merge_nodes(project_list, result, T_PROJECT_LIST, project);
+  merge_nodes(from_list, result, T_FROM_LIST, $2);
+  malloc_select_node(select_node, result->malloc_pool_);
+  select_node->children_[PARSE_SELECT_SELECT] = project_list;
+  select_node->children_[PARSE_SELECT_FROM] = from_list;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_STMT, 3, select_node, $4, $5);
+}
 ;
 
 copy_opt_tail:

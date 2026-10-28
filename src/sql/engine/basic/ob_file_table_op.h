@@ -47,7 +47,7 @@ public:
       json_format_(),
       sample_size_(-1),
       file_size_(0),
-      file_mtime_ns_(0),
+      file_mtime_ns_(0), file_device_(0), file_inode_(0), file_ctime_ns_(0), file_native_identity_(false),
       is_static_(false),
       static_column_count_(0),
       static_cells_(alloc)
@@ -69,6 +69,10 @@ public:
   int64_t sample_size_;
   int64_t file_size_;
   int64_t file_mtime_ns_;
+  uint64_t file_device_;
+  uint64_t file_inode_;
+  int64_t file_ctime_ns_;
+  bool file_native_identity_;
   // A static table (glob()/describe output) carries its rows in the spec.
   bool is_static_;
   int64_t static_column_count_;

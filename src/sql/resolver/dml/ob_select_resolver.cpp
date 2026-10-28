@@ -1050,6 +1050,8 @@ int ob_copy_bool(const ParseNode *value, bool &result)
     } else {
       ret = OB_INVALID_ARGUMENT;
     }
+  } else {
+    ret = OB_INVALID_ARGUMENT;
   }
   return ret;
 }
@@ -1157,6 +1159,20 @@ int ObSelectResolver::build_copy_into(const ParseNode &copy_node)
       }
     }
   }
+  if (OB_SUCC(ret) && (delimiter == 0 || delimiter == '\r' || delimiter == '\n'
+                       || quote == 0 || quote == '\r' || quote == '\n'
+                       || escape == 0 || escape == '\r' || escape == '\n'
+                       || delimiter == quote)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "COPY delimiter, quote and escape characters");
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < null_str.length(); ++i) {
+    const char c = null_str.ptr()[i];
+    if (c == 0 || c == delimiter || c == quote || c == '\r' || c == '\n') {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "COPY NULL text must fit one unquoted CSV field");
+    }
+  }
   // the target must not exist yet
   if (OB_SUCC(ret)) {
     const std::string path_str(path.ptr(), path.length());
@@ -1209,6 +1225,7 @@ int ObSelectResolver::build_copy_into(const ParseNode &copy_node)
     std::string header;
     const char delim = static_cast<char>(delimiter);
     const char q = static_cast<char>(quote);
+    const char esc = static_cast<char>(escape);
     for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
       const SelectItem &item = select_stmt->get_select_item(i);
       ObString name = item.alias_name_.empty() ? item.expr_name_ : item.alias_name_;
@@ -1218,7 +1235,7 @@ int ObSelectResolver::build_copy_into(const ParseNode &copy_node)
       bool need_quote = false;
       for (int64_t j = 0; j < name.length(); ++j) {
         const char c = name.ptr()[j];
-        if (c == delim || c == q || c == '\n' || c == '\r') {
+        if (c == delim || c == q || c == esc || c == '\n' || c == '\r') {
           need_quote = true;
           break;
         }
@@ -1229,7 +1246,9 @@ int ObSelectResolver::build_copy_into(const ParseNode &copy_node)
       for (int64_t j = 0; j < name.length(); ++j) {
         const char c = name.ptr()[j];
         if (c == q) {
-          header.push_back(q);
+          header.push_back(esc);
+        } else if (need_quote && c == esc && esc != q) {
+          header.push_back(esc);
         }
         header.push_back(c);
       }

@@ -122,7 +122,7 @@ struct ObFileTableDef
   ObFileTableDef()
     : path_(), format_(OB_FILE_TABLE_CSV), delimiter_(','), quote_('"'), escape_('"'),
       has_header_(true), null_str_(), json_format_(), sample_size_(-1), file_size_(0),
-      file_mtime_ns_(0), row_count_(0), is_static_(false), static_column_count_(0),
+      file_mtime_ns_(0), file_device_(0), file_inode_(0), file_ctime_ns_(0), file_native_identity_(false), row_count_(0), is_static_(false), static_column_count_(0),
       columns_(), static_cells_() {}
   int deep_copy(const ObFileTableDef &src, common::ObIAllocator &allocator);
   common::ObString path_;
@@ -136,6 +136,10 @@ struct ObFileTableDef
   int64_t sample_size_;
   int64_t file_size_;
   int64_t file_mtime_ns_;
+  uint64_t file_device_;
+  uint64_t file_inode_;
+  int64_t file_ctime_ns_;
+  bool file_native_identity_;
   int64_t row_count_;
   // A static table (glob() and DESCRIBE) carries its rows in the definition.
   bool is_static_;

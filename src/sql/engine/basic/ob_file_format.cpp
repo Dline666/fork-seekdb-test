@@ -41,6 +41,14 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#else
+#include <io.h>
+#endif
 
 namespace oceanbase
 {
@@ -67,6 +75,44 @@ bool fsql_check_identity(const std::string &path, const FileIdentity &expected, 
 }
 
 const int64_t FSQL_STREAM_BUFFER_SIZE = 64 * 1024;
+
+bool valid_utf8(const std::string &text)
+{
+  for (size_t i = 0; i < text.size();) {
+    const unsigned char c = static_cast<unsigned char>(text[i++]);
+    if (c < 0x80) continue;
+    int n = 0;
+    uint32_t cp = 0;
+    uint32_t minimum = 0;
+    if (c >= 0xC2 && c <= 0xDF) { n = 1; cp = c & 0x1F; minimum = 0x80; }
+    else if (c >= 0xE0 && c <= 0xEF) { n = 2; cp = c & 0x0F; minimum = 0x800; }
+    else if (c >= 0xF0 && c <= 0xF4) { n = 3; cp = c & 7; minimum = 0x10000; }
+    else return false;
+    if (text.size() - i < static_cast<size_t>(n)) return false;
+    while (n-- > 0) {
+      const unsigned char next = static_cast<unsigned char>(text[i++]);
+      if ((next & 0xC0) != 0x80) return false;
+      cp = (cp << 6) | (next & 0x3F);
+    }
+    if (cp < minimum || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+  }
+  return true;
+}
+
+bool account_row_bytes(const std::vector<Cell> &row, const int64_t limit, int64_t &used,
+                       std::string &err)
+{
+  for (const Cell &cell : row) {
+    const int64_t bytes = static_cast<int64_t>(sizeof(Cell)) + cell.str_value.size();
+    if (bytes > limit - used) {
+      err = "file scan batch memory limit exceeded";
+      return false;
+    }
+    used += bytes;
+  }
+  return true;
+}
+
 
 // Bits used while a value is classified.  A single value always maps to exactly
 // one bit; a column accumulates the OR of the bits of all its non-NULL values.
@@ -627,7 +673,7 @@ inline FileColumnType fsql_json_mask_to_column_type(int32_t mask)
 class FsqlFileStream
 {
 public:
-  FsqlFileStream() : fp_(nullptr), pos_(0), len_(0), at_eof_(false), pushback_(-1), line_(1) {}
+  FsqlFileStream() : fp_(nullptr), pos_(0), len_(0), at_eof_(false), pushback_(-1), line_(1), bytes_(0), record_start_(0), record_limit_(0) {}
   ~FsqlFileStream() { close(); }
 
   FsqlFileStream(const FsqlFileStream &) = delete;
@@ -636,10 +682,19 @@ public:
   int open(const std::string &path)
   {
     close();
-    fp_ = std::fopen(path.c_str(), "rb");
+    fp_ = open_local_file_for_read(path);
     if (fp_ == nullptr) {
       return -1;
     }
+    path_ = path;
+#ifndef _WIN32
+    if (read_file_descriptor_identity(fileno(fp_), identity_) != 0) {
+      close();
+      return -1;
+    }
+#else
+    if (read_file_identity(path_, identity_) != 0) { close(); return -1; }
+#endif
     buffer_.resize(static_cast<size_t>(FSQL_STREAM_BUFFER_SIZE));
     // Skip a UTF-8 BOM when present; the handle is brand new so rewinding is safe.
     char bom[3];
@@ -648,9 +703,10 @@ public:
                          static_cast<unsigned char>(bom[1]) == 0xBB &&
                          static_cast<unsigned char>(bom[2]) == 0xBF;
     if (std::fseek(fp_, has_bom ? 3 : 0, SEEK_SET) != 0) {
-      // Non seekable input: not supported, the caller sees a read failure later.
-      std::clearerr(fp_);
+      close();
+      return -1;
     }
+    if (std::ferror(fp_)) { close(); return -1; }
     return 0;
   }
 
@@ -665,6 +721,31 @@ public:
     at_eof_ = false;
     pushback_ = -1;
     line_ = 1;
+    bytes_ = 0;
+    record_limit_ = 0;
+    error_.clear();
+    identity_ = FileIdentity();
+    path_.clear();
+  }
+
+  void begin_record(int64_t limit) { record_start_ = bytes_ - (pushback_ >= 0 ? 1 : 0); record_limit_ = limit; }
+  void end_record() { record_limit_ = 0; }
+  bool read_ok(std::string &err) const
+  {
+    if (!error_.empty()) { err = error_; return false; }
+    if (fp_ == nullptr || std::ferror(fp_)) { err = "file read failed: " + path_; return false; }
+    return true;
+  }
+  bool check(std::string &err) const
+  {
+    FileIdentity current;
+    if (!read_ok(err)) return false;
+#ifndef _WIN32
+    if (fp_ == nullptr || read_file_descriptor_identity(fileno(fp_), current) != 0 || current != identity_) {
+      err = "opened file changed during scan: " + path_; return false;
+    }
+#endif
+    return fsql_check_identity(path_, identity_, err);
   }
 
   int next()
@@ -691,8 +772,13 @@ public:
 private:
   int raw_get()
   {
+    if (!error_.empty()) return -1;
     if (pos_ < len_) {
       const int c = static_cast<int>(static_cast<unsigned char>(buffer_[pos_++]));
+      ++bytes_;
+      if (record_limit_ > 0 && bytes_ - record_start_ > record_limit_) {
+        error_ = "file record byte limit exceeded at line " + std::to_string(line_); return -1;
+      }
       if (c == '\n') {
         ++line_;
       }
@@ -703,12 +789,17 @@ private:
     }
     const size_t read_bytes = std::fread(&buffer_[0], 1, buffer_.size(), fp_);
     if (read_bytes == 0) {
+      if (std::ferror(fp_)) error_ = "I/O error while reading file: " + path_;
       at_eof_ = true;
       return -1;
     }
     len_ = read_bytes;
     pos_ = 0;
     const int c = static_cast<int>(static_cast<unsigned char>(buffer_[pos_++]));
+    ++bytes_;
+    if (record_limit_ > 0 && bytes_ - record_start_ > record_limit_) {
+      error_ = "file record byte limit exceeded at line " + std::to_string(line_); return -1;
+    }
     if (c == '\n') {
       ++line_;
     }
@@ -722,6 +813,12 @@ private:
   bool at_eof_;
   int pushback_;
   int64_t line_;
+  int64_t bytes_;
+  int64_t record_start_;
+  int64_t record_limit_;
+  std::string error_;
+  std::string path_;
+  FileIdentity identity_;
 };
 
 // ---------------------------------------------------------------------------
@@ -756,10 +853,20 @@ public:
     delimiter_ = options.delimiter;
     quote_ = options.quote;
     escape_ = options.escape;
+    limits_ = options.limits;
+  }
+
+  int read_record(std::vector<FsqlCsvField> &fields, std::string &err)
+  {
+    if (stream_ == nullptr) { err = "csv parser is not initialized"; return -1; }
+    stream_->end_record();
+    const int result = read_record_impl(fields, err);
+    stream_->end_record();
+    return stream_->read_ok(err) ? result : -1;
   }
 
   // Returns 1 when a record was read, 0 at end of file and -1 on error.
-  int read_record(std::vector<FsqlCsvField> &fields, std::string &err)
+  int read_record_impl(std::vector<FsqlCsvField> &fields, std::string &err)
   {
     fields.clear();
     if (stream_ == nullptr) {
@@ -768,27 +875,15 @@ public:
     }
     const int delimiter_ch = static_cast<int>(static_cast<unsigned char>(delimiter_));
     const int quote_ch = static_cast<int>(static_cast<unsigned char>(quote_));
-    // Blank lines are not records.
-    for (;;) {
-      int c = stream_->peek();
-      if (c < 0) {
-        return 0;
-      }
-      if (c == '\n') {
-        stream_->next();
-        continue;
-      }
-      if (c == '\r') {
-        stream_->next();
-        if (stream_->peek() == '\n') {
-          stream_->next();
-        }
-        continue;
-      }
-      break;
-    }
+    // An empty CSV record is one unquoted empty field (NULL), not absent data.
+    // This is required to read a one-column COPY containing NULL rows back.
+    if (stream_->peek() < 0) return 0;
     record_line_ = stream_->line();
+    stream_->begin_record(limits_.max_record_bytes);
     for (;;) {
+      if (fields.size() >= static_cast<size_t>(limits_.max_columns)) {
+        err = "CSV column limit exceeded at line " + std::to_string(record_line_); return -1;
+      }
       FsqlCsvField field;
       bool end_of_record = false;
       const int c = stream_->peek();
@@ -819,10 +914,16 @@ public:
           }
           stream_->next();
         }
-      } else if (c >= 0) {
-        parse_unquoted_field(field.text, end_of_record);
+      } else if (c >= 0 && !parse_unquoted_field(field.text, end_of_record, err)) {
+        return -1;
       }
-      fields.push_back(field);
+      if (field.text.size() > static_cast<size_t>(limits_.max_field_bytes)) {
+        err = "CSV field byte limit exceeded"; return -1;
+      }
+      if (!valid_utf8(field.text)) {
+        err = "invalid UTF-8 in CSV field at line " + std::to_string(record_line_); return -1;
+      }
+      fields.push_back(std::move(field));
       if (end_of_record) {
         return 1;
       }
@@ -857,6 +958,10 @@ private:
     const int quote_ch = static_cast<int>(static_cast<unsigned char>(quote_));
     const int escape_ch = static_cast<int>(static_cast<unsigned char>(escape_));
     for (;;) {
+      if (text.size() >= static_cast<size_t>(limits_.max_field_bytes)) {
+        const int next = stream_->peek();
+        if (next != quote_ch) { err = "CSV field byte limit exceeded"; return false; }
+      }
       const int c = stream_->next();
       if (c < 0) {
         err = "unterminated quoted field starting at line " + std::to_string(record_line_);
@@ -894,7 +999,7 @@ private:
     }
   }
 
-  void parse_unquoted_field(std::string &text, bool &end_of_record)
+  bool parse_unquoted_field(std::string &text, bool &end_of_record, std::string &err)
   {
     const int delimiter_ch = static_cast<int>(static_cast<unsigned char>(delimiter_));
     end_of_record = false;
@@ -919,14 +1024,22 @@ private:
           break;
         }
         // A CR that is not followed by LF is data.
+        if (text.size() >= static_cast<size_t>(limits_.max_field_bytes)) {
+          err = "CSV field byte limit exceeded"; return false;
+        }
         text.push_back('\r');
         continue;
+      }
+      if (text.size() >= static_cast<size_t>(limits_.max_field_bytes)) {
+        err = "CSV field byte limit exceeded"; return false;
       }
       stream_->next();
       text.push_back(static_cast<char>(c));
     }
+    return true;
   }
 
+  FileScanLimits limits_;
   FsqlFileStream *stream_;
   char delimiter_;
   char quote_;
@@ -1273,6 +1386,9 @@ public:
   FsqlJsonCursor() : stream_(nullptr) {}
 
   void init(FsqlFileStream *stream) { stream_ = stream; }
+  void set_limits(const FileScanLimits &limits) { limits_ = limits; }
+  int64_t max_columns() const { return limits_.max_columns; }
+  void begin_record() { stream_->begin_record(limits_.max_record_bytes); }
 
   int peek() { return stream_->peek(); }
   int get() { return stream_->next(); }
@@ -1304,8 +1420,13 @@ public:
         return false;
       }
       if (c == '"') {
+        if (!valid_utf8(out)) { err = "invalid UTF-8 in JSON string"; return false; }
         return true;
       }
+      if (out.size() >= static_cast<size_t>(limits_.max_field_bytes)) {
+        err = "JSON string byte limit exceeded"; return false;
+      }
+      if (c < 0x20) { err = "unescaped control character in JSON string"; return false; }
       if (c != '\\') {
         out.push_back(static_cast<char>(c));
         continue;
@@ -1349,13 +1470,17 @@ public:
               if (read_hex4(low) && low >= 0xDC00 && low <= 0xDFFF) {
                 codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00);
               } else {
-                codepoint = 0xFFFD;
+                err = "invalid low surrogate in JSON string"; return false;
               }
             } else {
-              codepoint = 0xFFFD;
+              err = "missing low surrogate in JSON string"; return false;
             }
           } else if (codepoint >= 0xDC00 && codepoint <= 0xDFFF) {
-            codepoint = 0xFFFD;
+            err = "unpaired low surrogate in JSON string"; return false;
+          }
+          const size_t bytes = codepoint <= 0x7F ? 1 : codepoint <= 0x7FF ? 2 : codepoint <= 0xFFFF ? 3 : 4;
+          if (bytes > static_cast<size_t>(limits_.max_field_bytes) - out.size()) {
+            err = "JSON string byte limit exceeded"; return false;
           }
           fsql_append_utf8(out, codepoint);
           break;
@@ -1373,6 +1498,9 @@ public:
     for (;;) {
       const int c = stream_->peek();
       if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+        if (out.size() >= static_cast<size_t>(limits_.max_field_bytes)) {
+          err = "JSON scalar byte limit exceeded"; return false;
+        }
         out.push_back(static_cast<char>(stream_->next()));
         continue;
       }
@@ -1391,6 +1519,9 @@ public:
     for (;;) {
       const int c = stream_->peek();
       if (fsql_is_digit_char(c) || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E') {
+        if (out.size() >= static_cast<size_t>(limits_.max_field_bytes)) {
+          err = "JSON scalar byte limit exceeded"; return false;
+        }
         out.push_back(static_cast<char>(stream_->next()));
         continue;
       }
@@ -1426,6 +1557,7 @@ private:
     return true;
   }
 
+  FileScanLimits limits_;
   FsqlFileStream *stream_;
 };
 
@@ -1434,9 +1566,35 @@ inline std::string fsql_json_line_prefix(const FsqlJsonCursor &cursor)
   return "line " + std::to_string(cursor.line()) + ": ";
 }
 
+inline bool fsql_validate_json_number(const std::string &token)
+{
+  size_t i = 0;
+  if (i < token.size() && token[i] == '-') ++i;
+  if (i == token.size()) return false;
+  if (token[i] == '0') ++i;
+  else {
+    if (token[i] < '1' || token[i] > '9') return false;
+    while (i < token.size() && fsql_is_digit_char(token[i])) ++i;
+  }
+  if (i < token.size() && token[i] == '.') {
+    ++i;
+    const size_t start = i;
+    while (i < token.size() && fsql_is_digit_char(token[i])) ++i;
+    if (start == i) return false;
+  }
+  if (i < token.size() && (token[i] == 'e' || token[i] == 'E')) {
+    ++i;
+    if (i < token.size() && (token[i] == '+' || token[i] == '-')) ++i;
+    const size_t start = i;
+    while (i < token.size() && fsql_is_digit_char(token[i])) ++i;
+    if (start == i) return false;
+  }
+  return i == token.size();
+}
+
 inline bool fsql_json_number_from_token(const std::string &token, FsqlJsonValue &value, std::string &err)
 {
-  if (!fsql_validate_decimal_syntax(token.data(), token.size())) {
+  if (!fsql_validate_json_number(token)) {
     err = "invalid JSON number \"" + token + "\"";
     return false;
   }
@@ -1525,6 +1683,7 @@ inline bool fsql_json_parse_flat_object(FsqlJsonCursor &cursor,
     err = fsql_json_line_prefix(cursor) + "expected a JSON object";
     return false;
   }
+  cursor.begin_record();
   cursor.get();
   cursor.skip_ws();
   if (cursor.peek() == '}') {
@@ -1568,6 +1727,9 @@ inline bool fsql_json_parse_flat_object(FsqlJsonCursor &cursor,
       }
     }
     if (!replaced) {
+      if (object.size() >= static_cast<size_t>(cursor.max_columns())) {
+        err = fsql_json_line_prefix(cursor) + "JSON column limit exceeded"; return false;
+      }
       object.push_back(std::make_pair(key, value));
     }
     cursor.skip_ws();
@@ -1604,6 +1766,8 @@ public:
 
   int open(const std::string &path, const FileScanOptions &options, std::string &err)
   {
+    if (!validate_scan_limits(options.limits, err)) return -1;
+    cursor_.set_limits(options.limits);
     mode_ = FSQL_JSON_MODE_NEWLINE_DELIMITED;
     started_ = false;
     finished_ = false;
@@ -1645,13 +1809,12 @@ public:
     if (finished_) {
       return 0;
     }
-    if (mode_ == FSQL_JSON_MODE_ARRAY) {
-      return next_row_from_array(object, err);
-    }
-    if (mode_ == FSQL_JSON_MODE_OBJECT) {
-      return next_row_from_single_object(object, err);
-    }
-    return next_row_newline_delimited(object, err);
+    stream_.end_record();
+    const int result = mode_ == FSQL_JSON_MODE_ARRAY ? next_row_from_array(object, err)
+        : mode_ == FSQL_JSON_MODE_OBJECT ? next_row_from_single_object(object, err)
+        : next_row_newline_delimited(object, err);
+    stream_.end_record();
+    return stream_.read_ok(err) ? result : -1;
   }
 
 private:
@@ -1769,6 +1932,10 @@ private:
     return 1;
   }
 
+public:
+  bool check(std::string &err) const { return stream_.check(err); }
+
+private:
   FsqlFileStream stream_;
   FsqlJsonCursor cursor_;
   int32_t mode_;
@@ -1842,7 +2009,7 @@ public:
       return FAILED;
     }
     path_ = path;
-    if (!fsql_check_identity(path_, identity_, err)) {
+    if (!stream_.check(err) || !fsql_check_identity(path_, identity_, err)) {
       return FAILED;
     }
     parser_.open(stream_, options_);
@@ -1871,7 +2038,7 @@ public:
       err = "read_csv: reader is not open";
       return FAILED;
     }
-    if (!fsql_check_identity(path_, identity_, err)) {
+    if (!stream_.check(err) || !fsql_check_identity(path_, identity_, err)) {
       return FAILED;
     }
     if (eof_) {
@@ -1883,6 +2050,8 @@ public:
     std::vector<FsqlCsvField> record;
     std::vector<Cell> row;
     int64_t produced = 0;
+    int64_t batch_bytes = 0;
+    max_rows = std::min(max_rows, options_.limits.max_batch_rows);
     while (produced < max_rows) {
       const int ret = parser_.read_record(record, err);
       if (ret < 0) {
@@ -1908,10 +2077,11 @@ public:
           fsql_reset_cell(row[i], columns_[i].type);
         }
       }
+      if (!account_row_bytes(row, options_.limits.max_batch_bytes, batch_bytes, err)) return FAILED;
       rows.push_back(std::move(row));
       ++produced;
     }
-    if (!fsql_check_identity(path_, identity_, err)) {
+    if (!stream_.check(err) || !fsql_check_identity(path_, identity_, err)) {
       return FAILED;
     }
     if (produced == 0) {
@@ -1967,7 +2137,7 @@ public:
       return FAILED;
     }
     path_ = path;
-    if (!fsql_check_identity(path_, identity_, err)) {
+    if (!rows_.check(err) || !fsql_check_identity(path_, identity_, err)) {
       return FAILED;
     }
     opened_ = true;
@@ -1983,7 +2153,7 @@ public:
       err = "read_json: reader is not open";
       return FAILED;
     }
-    if (!fsql_check_identity(path_, identity_, err)) {
+    if (!rows_.check(err) || !fsql_check_identity(path_, identity_, err)) {
       return FAILED;
     }
     if (eof_) {
@@ -1994,6 +2164,8 @@ public:
     }
     std::vector<Cell> row;
     int64_t produced = 0;
+    int64_t batch_bytes = 0;
+    max_rows = std::min(max_rows, options_.limits.max_batch_rows);
     while (produced < max_rows) {
       const int ret = rows_.next_row(object_, err);
       if (ret < 0) {
@@ -2018,10 +2190,11 @@ public:
           fsql_json_value_to_cell(*value, columns_[i].type, row[i]);
         }
       }
+      if (!account_row_bytes(row, options_.limits.max_batch_bytes, batch_bytes, err)) return FAILED;
       rows.push_back(std::move(row));
       ++produced;
     }
-    if (!fsql_check_identity(path_, identity_, err)) {
+    if (!rows_.check(err) || !fsql_check_identity(path_, identity_, err)) {
       return FAILED;
     }
     if (produced == 0) {
@@ -2291,7 +2464,8 @@ bool validate_file_path(const std::string &path,
   namespace fs = std::filesystem;
   resolved_path.clear();
   err.clear();
-  if (path.empty() || secure_directory.empty() || fsql_ascii_iequal_literal(secure_directory, "null") ||
+  if (path.empty() || secure_directory.empty() || path.size() > 32768 || secure_directory.size() > 32768
+      || fsql_ascii_iequal_literal(secure_directory, "null") ||
       path.find('\0') != std::string::npos || secure_directory.find('\0') != std::string::npos) {
     err = "empty or NUL-containing file path or secure directory";
     return false;
@@ -2360,6 +2534,150 @@ bool validate_file_path(const std::string &path,
   return true;
 }
 
+namespace
+{
+bool glob_component_matches(const std::string &pattern, const std::string &name)
+{
+  size_t p = 0, n = 0, star = std::string::npos, retry = 0;
+  while (n < name.size()) {
+    if (p < pattern.size() && (pattern[p] == '?' || pattern[p] == name[n])) { ++p; ++n; }
+    else if (p < pattern.size() && pattern[p] == '*') { star = p++; retry = n; }
+    else if (star != std::string::npos) { p = star + 1; n = ++retry; }
+    else return false;
+  }
+  while (p < pattern.size() && pattern[p] == '*') ++p;
+  return p == pattern.size();
+}
+
+constexpr size_t GLOB_MAX_DEPTH = 64;
+constexpr size_t GLOB_MAX_FILES = 10000;
+constexpr size_t GLOB_MAX_VISITED = 100000;
+
+#ifndef _WIN32
+int glob_walk_fd(int directory, const std::filesystem::path &prefix,
+                 const std::vector<std::string> &parts, size_t index,
+                 std::vector<std::string> &files, size_t &visited, std::string &err)
+{
+  const std::string &component = parts[index];
+  const bool wildcard = component.find_first_of("*?") != std::string::npos;
+  auto visit = [&](const std::string &name) -> int {
+    if (++visited > GLOB_MAX_VISITED) { err = "glob directory entry limit exceeded"; return -1; }
+    struct stat st;
+    if (::fstatat(directory, name.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) {
+      if (errno == ENOENT) return 0;
+      err = "cannot inspect glob entry"; return -1;
+    }
+    if (S_ISLNK(st.st_mode)) {
+      err = "glob refuses symbolic links: " + (prefix / name).string(); return -1;
+    }
+    if (index + 1 == parts.size()) {
+      if (S_ISREG(st.st_mode)) {
+        if (files.size() >= GLOB_MAX_FILES) { err = "glob file limit exceeded"; return -1; }
+        files.push_back((prefix / name).string());
+      }
+      return 0;
+    }
+    if (!S_ISDIR(st.st_mode)) return 0;
+    const int child = ::openat(directory, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (child < 0) { err = "glob directory changed while opening it"; return -1; }
+    const int rc = glob_walk_fd(child, prefix / name, parts, index + 1, files, visited, err);
+    ::close(child);
+    return rc;
+  };
+  if (!wildcard) return visit(component);
+  // fdopendir owns only the duplicate; recursive calls keep their own anchored
+  // descriptors, so rename/symlink replacement cannot redirect enumeration.
+  const int duplicate = ::dup(directory);
+  if (duplicate < 0) { err = "cannot duplicate glob directory handle"; return -1; }
+  DIR *dir = ::fdopendir(duplicate);
+  if (dir == nullptr) { ::close(duplicate); err = "cannot enumerate glob directory"; return -1; }
+  int rc = 0;
+  for (;;) {
+    errno = 0;
+    struct dirent *entry = ::readdir(dir);
+    if (entry == nullptr) {
+      if (errno != 0) { err = "I/O error enumerating glob directory"; rc = -1; }
+      break;
+    }
+    const std::string name(entry->d_name);
+    if (++visited > GLOB_MAX_VISITED) { err = "glob directory entry limit exceeded"; rc = -1; break; }
+    if (name.empty() || name[0] == '.' || !glob_component_matches(component, name)) continue;
+    rc = visit(name);
+    if (rc != 0) break;
+  }
+  ::closedir(dir);
+  return rc;
+}
+#else
+int glob_walk_path(const std::filesystem::path &prefix, const std::vector<std::string> &parts,
+                   size_t index, std::vector<std::string> &files, size_t &visited, std::string &err)
+{
+  namespace fs = std::filesystem;
+  const bool wildcard = parts[index].find_first_of("*?") != std::string::npos;
+  auto visit = [&](const fs::path &path) -> int {
+    if (++visited > GLOB_MAX_VISITED) { err = "glob entry limit exceeded"; return -1; }
+    std::error_code ec;
+    const auto status = fs::symlink_status(path, ec);
+    if (ec == std::errc::no_such_file_or_directory) return 0;
+    if (ec) { err = "cannot inspect glob entry"; return -1; }
+    if (fs::is_symlink(status)) { err = "glob refuses symbolic links"; return -1; }
+    if (index + 1 == parts.size()) {
+      if (fs::is_regular_file(status)) {
+        if (files.size() >= GLOB_MAX_FILES) { err = "glob file limit exceeded"; return -1; }
+        files.push_back(path.string());
+      }
+      return 0;
+    }
+    return fs::is_directory(status) ? glob_walk_path(path, parts, index + 1, files, visited, err) : 0;
+  };
+  if (!wildcard) return visit(prefix / parts[index]);
+  std::error_code ec;
+  fs::directory_iterator it(prefix.empty() ? fs::path(".") : prefix, ec);
+  if (ec) { err = "cannot open glob directory"; return -1; }
+  for (fs::directory_iterator end; it != end; it.increment(ec)) {
+    if (ec) { err = "cannot read glob directory"; return -1; }
+    const std::string name = it->path().filename().string();
+    if (++visited > GLOB_MAX_VISITED) { err = "glob entry limit exceeded"; return -1; }
+    if (name.empty() || name[0] == '.' || !glob_component_matches(parts[index], name)) continue;
+    if (visit(it->path()) != 0) return -1;
+  }
+  return ec ? -1 : 0;
+}
+#endif
+} // namespace
+
+int discover_files(const std::string &pattern, std::vector<std::string> &files, std::string &err)
+{
+  files.clear();
+  err.clear();
+  if (pattern.empty() || pattern.find('\0') != std::string::npos || pattern.size() > 32768) {
+    err = "invalid glob pattern"; return -1;
+  }
+  const std::filesystem::path path(pattern);
+  std::vector<std::string> parts;
+  for (const auto &part : path.relative_path()) {
+    const std::string name = part.string();
+    if (name.empty() || name == ".") continue;
+    if (name == ".." || parts.size() >= GLOB_MAX_DEPTH) {
+      err = "glob parent traversal or path depth limit exceeded"; return -1;
+    }
+    parts.push_back(name);
+  }
+  if (parts.empty()) { err = "glob has no file component"; return -1; }
+  size_t visited = 0;
+#ifndef _WIN32
+  const int dir = ::open(path.is_absolute() ? "/" : ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (dir < 0) { err = "cannot open glob root"; return -1; }
+  const int rc = glob_walk_fd(dir, path.root_path(), parts, 0, files, visited, err);
+  ::close(dir);
+#else
+  const int rc = glob_walk_path(path.root_path(), parts, 0, files, visited, err);
+#endif
+  if (rc != 0) { files.clear(); return -1; }
+  std::sort(files.begin(), files.end());
+  return 0;
+}
+
 const char *file_column_type_name(FileColumnType type)
 {
   switch (type) {
@@ -2407,31 +2725,129 @@ bool detect_format_by_extension(const std::string &path, int32_t &format)
   return false;
 }
 
+bool validate_scan_limits(const FileScanLimits &limits, std::string &err)
+{
+  const FileScanLimits maximum;
+  if (limits.max_field_bytes <= 0 || limits.max_field_bytes > maximum.max_field_bytes
+      || limits.max_record_bytes <= 0 || limits.max_record_bytes > maximum.max_record_bytes
+      || limits.max_columns <= 0 || limits.max_columns > maximum.max_columns
+      || limits.max_batch_rows <= 0 || limits.max_batch_rows > maximum.max_batch_rows
+      || limits.max_batch_bytes <= 0 || limits.max_batch_bytes > maximum.max_batch_bytes) {
+    err = "invalid file scan resource limits";
+    return false;
+  }
+  return true;
+}
+
+#ifndef _WIN32
+static bool stat_time_to_ns(int64_t seconds, long nanoseconds, int64_t &result)
+{
+  // POSIX guarantees tv_nsec is in [0, 1e9).  Keep the multiplication and
+  // addition checked: a corrupt or future timestamp must not wrap and make a
+  // changed file look unchanged.
+  static const int64_t NANOSECONDS_PER_SECOND = 1000000000LL;
+  if (nanoseconds < 0 || nanoseconds >= NANOSECONDS_PER_SECOND
+      || seconds > INT64_MAX / NANOSECONDS_PER_SECOND
+      || seconds < INT64_MIN / NANOSECONDS_PER_SECOND) {
+    return false;
+  }
+  const int64_t base = seconds * NANOSECONDS_PER_SECOND;
+  if (seconds > 0 && nanoseconds > INT64_MAX - base) {
+    return false;
+  }
+  result = base + static_cast<int64_t>(nanoseconds);
+  return true;
+}
+
+static int identity_from_stat(const struct stat &st, FileIdentity &identity)
+{
+  identity = FileIdentity();
+  if (!S_ISREG(st.st_mode) || st.st_size < 0) return -1;
+  identity.size = st.st_size;
+#ifdef __APPLE__
+  if (!stat_time_to_ns(st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec, identity.mtime_ns)
+      || !stat_time_to_ns(st.st_ctimespec.tv_sec, st.st_ctimespec.tv_nsec, identity.ctime_ns)) return -1;
+#else
+  if (!stat_time_to_ns(st.st_mtim.tv_sec, st.st_mtim.tv_nsec, identity.mtime_ns)
+      || !stat_time_to_ns(st.st_ctim.tv_sec, st.st_ctim.tv_nsec, identity.ctime_ns)) return -1;
+#endif
+  identity.device = st.st_dev;
+  identity.inode = st.st_ino;
+  identity.native_valid = true;
+  identity.valid = true;
+  return 0;
+}
+#endif
+
+std::FILE *open_local_file_for_read(const std::string &path)
+{
+  if (path.empty() || path.size() > 32768 || path.find('\0') != std::string::npos) return nullptr;
+#ifndef _WIN32
+  // SQL passes a canonical path. Refuse links at each component so replacing a
+  // validated directory with a symlink cannot redirect the later open.
+  const std::filesystem::path p(path);
+  int dir = ::open(p.is_absolute() ? "/" : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dir < 0) return nullptr;
+  std::vector<std::string> parts;
+  for (const auto &part : p.relative_path()) {
+    const std::string name = part.string();
+    if (name.empty() || name == ".") continue;
+    if (name == "..") { ::close(dir); return nullptr; }
+    parts.push_back(name);
+  }
+  if (parts.empty()) { ::close(dir); return nullptr; }
+  for (size_t i = 0; i + 1 < parts.size(); ++i) {
+    const int next = ::openat(dir, parts[i].c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    ::close(dir);
+    if (next < 0) return nullptr;
+    dir = next;
+  }
+  const int fd = ::openat(dir, parts.back().c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+  ::close(dir);
+  FileIdentity identity;
+  if (fd < 0) return nullptr;
+  if (read_file_descriptor_identity(fd, identity) != 0) { ::close(fd); return nullptr; }
+  std::FILE *result = ::fdopen(fd, "rb");
+  if (result == nullptr) ::close(fd);
+  return result;
+#else
+  return std::fopen(path.c_str(), "rb");
+#endif
+}
+
+int read_file_descriptor_identity(int fd, FileIdentity &identity)
+{
+  identity = FileIdentity();
+#ifndef _WIN32
+  struct stat st;
+  return ::fstat(fd, &st) == 0 ? identity_from_stat(st, identity) : -1;
+#else
+  (void)fd;
+  identity = FileIdentity();
+  return -1;
+#endif
+}
+
 int read_file_identity(const std::string &path, FileIdentity &identity)
 {
   identity = FileIdentity();
-  if (path.empty()) {
-    return -1;
-  }
+  if (path.empty() || path.find('\0') != std::string::npos) return -1;
+#ifndef _WIN32
+  struct stat st;
+  return ::stat(path.c_str(), &st) == 0 ? identity_from_stat(st, identity) : -1;
+#else
   std::error_code ec;
-  const std::filesystem::path fs_path(path);
-  const uintmax_t size = std::filesystem::file_size(fs_path, ec);
-  if (ec) {
-    return -1;
-  }
-  const std::filesystem::file_time_type write_time = std::filesystem::last_write_time(fs_path, ec);
-  if (ec) {
-    return -1;
-  }
-  const std::chrono::nanoseconds since_epoch =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(write_time.time_since_epoch());
-  if (size > static_cast<uintmax_t>(9223372036854775807LL)) {
-    return -1;
-  }
+  const std::filesystem::path p(path);
+  if (!std::filesystem::is_regular_file(p, ec) || ec) return -1;
+  const auto size = std::filesystem::file_size(p, ec);
+  if (ec || size > static_cast<uintmax_t>(INT64_MAX)) return -1;
+  const auto time = std::filesystem::last_write_time(p, ec);
+  if (ec) return -1;
   identity.size = static_cast<int64_t>(size);
-  identity.mtime_ns = static_cast<int64_t>(since_epoch.count());
+  identity.mtime_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
   identity.valid = true;
   return 0;
+#endif
 }
 
 int infer_csv_schema(const std::string &path,
@@ -2443,6 +2859,11 @@ int infer_csv_schema(const std::string &path,
   err.clear();
   columns.clear();
   identity = FileIdentity();
+  if (!validate_scan_limits(options.limits, err)) return -1;
+  if (options.sample_size != -1) {
+    err = "sample_size is not supported for CSV; inference scans the whole file";
+    return -1;
+  }
   if (read_file_identity(path, identity) != 0) {
     identity = FileIdentity();
     err = "cannot read the file identity: " + path;
@@ -2531,7 +2952,7 @@ int infer_csv_schema(const std::string &path,
     columns[i].type = fsql_mask_to_column_type(masks[i]);
     columns[i].nullable = null_seen[i] != 0;
   }
-  return fsql_check_identity(path, identity, err) ? 0 : -1;
+  return stream.check(err) && fsql_check_identity(path, identity, err) ? 0 : -1;
 }
 
 int infer_json_schema(const std::string &path,
@@ -2543,6 +2964,11 @@ int infer_json_schema(const std::string &path,
   err.clear();
   columns.clear();
   identity = FileIdentity();
+  if (!validate_scan_limits(options.limits, err)) return -1;
+  if (options.sample_size != -1) {
+    err = "sample_size is not supported for JSON; inference scans the whole file";
+    return -1;
+  }
   if (read_file_identity(path, identity) != 0) {
     identity = FileIdentity();
     err = "cannot read the file identity: " + path;
@@ -2556,6 +2982,11 @@ int infer_json_schema(const std::string &path,
   std::vector<char> null_seen;
   std::vector<int64_t> appearances;
   std::unordered_map<std::string, size_t> key_index;
+  // A union schema retains every distinct key until inference completes.  A
+  // per-key limit alone would allow thousands of maximum-sized keys to retain
+  // far more memory than the record budget.  Count both persistent string
+  // copies (the map key and FileColumn::name) before inserting either one.
+  int64_t schema_bytes = 0;
   FsqlJsonObject object;
   int64_t row_count = 0;
   for (;;) {
@@ -2573,7 +3004,17 @@ int infer_json_schema(const std::string &path,
       std::unordered_map<std::string, size_t>::iterator found = key_index.find(key);
       size_t column;
       if (found == key_index.end()) {
+        if (columns.size() >= static_cast<size_t>(options.limits.max_columns)) {
+          err = "JSON union schema column limit exceeded"; return -1;
+        }
+        if (key.size() > static_cast<size_t>(INT64_MAX / 2)
+            || static_cast<int64_t>(key.size()) > (options.limits.max_record_bytes - schema_bytes) / 2) {
+          columns.clear();
+          err = "JSON union schema metadata byte limit exceeded";
+          return -1;
+        }
         column = columns.size();
+        schema_bytes += static_cast<int64_t>(key.size()) * 2;
         key_index.insert(std::make_pair(key, column));
         FileColumn column_desc;
         column_desc.name = key;
@@ -2606,7 +3047,7 @@ int infer_json_schema(const std::string &path,
     columns[i].type = fsql_json_mask_to_column_type(masks[i]);
     columns[i].nullable = null_seen[i] != 0 || appearances[i] < row_count;
   }
-  return fsql_check_identity(path, identity, err) ? 0 : -1;
+  return rows.check(err) && fsql_check_identity(path, identity, err) ? 0 : -1;
 }
 
 FileBatchReader *create_file_reader(int32_t format)

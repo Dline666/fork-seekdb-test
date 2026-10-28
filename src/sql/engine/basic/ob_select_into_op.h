@@ -28,6 +28,7 @@ namespace oceanbase
 {
 namespace sql
 {
+namespace file_sql { class CopyFilePublication; }
 class ObSelectIntoOpInput : public ObOpInput
 {
   OB_UNIS_VERSION_V(1);
@@ -73,6 +74,7 @@ public:
       is_overwrite_(false),
       external_properties_(alloc),
       has_header_(false),
+      is_copy_(false),
       null_str_(),
       header_line_()
   {
@@ -95,6 +97,7 @@ public:
   bool is_overwrite_;
   ObExternalFileFormat::StringData external_properties_;
   bool has_header_;
+  bool is_copy_;
   common::ObString null_str_;
   common::ObString header_line_;
   static const int64_t DEFAULT_MAX_FILE_SIZE = 256LL * 1024 * 1024;
@@ -133,7 +136,9 @@ public:
       format_type_(ObExternalFileFormat::FormatType::CSV_FORMAT),
       block_id_(0),
       need_commit_(true),
-      header_written_(false)
+      header_written_(false),
+      copy_publication_(nullptr),
+      copy_finished_(false)
   {
   }
 
@@ -143,7 +148,7 @@ public:
     ObEscapePrinter():
       enclose_(), escape_(), zero_(), field_terminator_(), line_terminator_(), convert_replacer_(),
       need_enclose_(false), do_encode_(false), do_escape_(false), print_hex_(false),
-      ignore_convert_failed_(false) {}
+      ignore_convert_failed_(false), csv_literal_zero_(false) {}
     int operator() (const ObString &src_str, const ob_wc_t &unicode_value) {
       int ret = OB_SUCCESS;
       ObString dst_str = src_str;
@@ -159,7 +164,7 @@ public:
         }
       }
       if (OB_FAIL(ret) || !do_escape_ || print_hex_) {
-      } else if (dst_str.compare(zero_) == 0
+      } else if ((!csv_literal_zero_ && dst_str.compare(zero_) == 0)
                  || dst_str.compare(enclose_) == 0
                  || dst_str.compare(escape_) == 0
                  || (!need_enclose_ && (dst_str.compare(field_terminator_) == 0
@@ -169,7 +174,7 @@ public:
       if (OB_FAIL(ret)) {
       } else if (print_hex_) {
         ret = hex_print(dst_str.ptr(), dst_str.length(), buf_, buf_len_, pos_);
-      } else if (do_escape_ && dst_str.compare(zero_) == 0) {
+      } else if (do_escape_ && !csv_literal_zero_ && dst_str.compare(zero_) == 0) {
         char zero = '0';
         ret = databuff_memcpy(buf_, buf_len_, pos_, 1, &zero);
       } else {
@@ -189,6 +194,7 @@ public:
     bool do_escape_;
     bool print_hex_;
     bool ignore_convert_failed_;
+    bool csv_literal_zero_;
     char *buf_;
     int64_t buf_len_;
     int64_t pos_;
@@ -263,6 +269,10 @@ private:
   int create_the_only_data_writer(ObExternalFileWriter *&data_writer);
   int new_data_writer(ObExternalFileWriter *&data_writer);
   int check_secure_file_path(ObString file_name);
+  int prepare_copy_file();
+  int finish_copy_file();
+  void abort_copy_file();
+  int write_copy_header(ObCsvFileWriter &writer);
   char *get_json_buf() { return json_buf_; }
   int64_t get_json_buf_len() { return json_buf_len_; }
   char *get_shared_buf() { return shared_buf_; }
@@ -300,6 +310,8 @@ private:
   uint32_t block_id_;
   bool need_commit_;
   bool header_written_;
+  file_sql::CopyFilePublication *copy_publication_;
+  bool copy_finished_;
   static const int64_t SHARED_BUFFER_SIZE = 2LL * 1024 * 1024;
 
 };
