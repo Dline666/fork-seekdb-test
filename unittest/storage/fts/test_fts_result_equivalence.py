@@ -141,7 +141,7 @@ def main():
                     if detail:
                         options.append({'output': 'all'})
                     capture(repr(('IK tokens', mode, text, detail)),
-                            'select tokenize(%s,%s,%s)', (text, 'ik', json.dumps(options)))
+                            'select tokenize(%s,%s,%s) as tokens', (text, 'ik', json.dumps(options)))
             query("update chinese_docs set content='新的全文检索数据库内容' where id=1")
             query('delete from chinese_docs where id=2')
             capture(mode + ' Chinese mutations', "select id from chinese_docs where "

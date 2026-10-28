@@ -14,7 +14,7 @@ def main():
   if c is None:raise RuntimeError('startup timeout')
   cur=c.cursor()
   def execute(text,parser,detail=False):
-   sql='select tokenize(%s,%s'+(",json_array(json_object('output','all')))" if detail else ')')
+   sql='select tokenize(%s,%s'+(",json_array(json_object('output','all')))" if detail else ')')+' as tokens'
    cur.execute(sql,(text,parser));r=cur.fetchone()[0]
    return json.loads(r) if r is not None else None
   def canonical(value):
