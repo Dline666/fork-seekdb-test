@@ -376,8 +376,16 @@ struct ObDatumStrCmpImpl
   static int OB_INLINE cmp(const ObDatum &l, const ObDatum &r, int &cmp_ret,
                            const ObCollationType cs, const bool with_end_space)
   {
-    cmp_ret = ObCharset::strcmpsp(cs, l.ptr_, l.len_, r.ptr_, r.len_, with_end_space);
-    cmp_ret = cmp_ret > 0 ? 1 : (cmp_ret < 0 ? -1 : 0);
+    // Equal byte strings compare equal under every supported collation and
+    // padding mode. Posting-list sorts compare the same token many times;
+    // avoid repeatedly decoding it before comparing the document-id suffix.
+    if (l.len_ == r.len_ && (l.len_ == 0 || l.ptr_ == r.ptr_
+        || 0 == MEMCMP(l.ptr_, r.ptr_, l.len_))) {
+      cmp_ret = 0;
+    } else {
+      cmp_ret = ObCharset::strcmpsp(cs, l.ptr_, l.len_, r.ptr_, r.len_, with_end_space);
+      cmp_ret = cmp_ret > 0 ? 1 : (cmp_ret < 0 ? -1 : 0);
+    }
     return OB_SUCCESS;
   }
 };
