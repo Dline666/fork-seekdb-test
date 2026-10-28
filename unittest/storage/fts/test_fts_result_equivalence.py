@@ -107,6 +107,46 @@ def main():
             elif stage == 'after rollback':
                 query('rollback')
             capture(stage, "select id from docs where match(content) against('database storage engine')>0 order by id")
+        # Exercise overlapping dictionary prefixes, both IK modes and multiple
+        # indexed columns. Whole row sets and scores are compared with baseline,
+        # rather than treating benchmark hit counts as correctness evidence.
+        for mode in ['smart', 'max_word']:
+            query('create table chinese_docs(id int primary key,title varchar(300),content text,'
+                  'fulltext index chinese_ft(title,content) with parser ik '
+                  'parser_properties=(ik_mode="' + mode + '"))')
+            chinese = [
+                (1, '中华人民共和国', '中华人民共和国中央人民政府成立，数据库全文索引检索。'),
+                (2, '数据库系统', '数据库数据库 全文检索 OceanBase database engine'),
+                (3, '南京市长江大桥', '南京市长江大桥上的研究生命起源项目'),
+                (4, '混合 English', '性能优化 tokenizer 中国科学院计算技术研究所'),
+                (5, '', ''), (6, None, None),
+                (7, '国际化', 'Café naïve Straße Ελληνικά 😀 中文'),
+                (8, '长文边界', '中华人民共和国中央人民政府 南京市长江大桥 数据库性能优化。' * 120),
+            ]
+            cursor.executemany('insert into chinese_docs values(%s,%s,%s)', chinese)
+            for text in ['中华人民共和国', '中国 人民', '中央人民政府', '数据库 全文',
+                         '南京市 长江大桥', '研究生命起源', 'OceanBase 数据库',
+                         '计算技术研究所', '😀', '', None, '不存在的词']:
+                for hint in ['', '/*+ index(chinese_docs chinese_ft) */ ',
+                             '/*+ no_index(chinese_docs chinese_ft) */ ']:
+                    match = 'match(title,content) against(%s)'
+                    capture(repr(('IK', mode, text, hint, 'ids')), 'select ' + hint
+                            + 'id from chinese_docs where ' + match + '>0 order by id', (text,))
+                    capture(repr(('IK', mode, text, hint, 'scores')), 'select ' + hint
+                            + 'id,' + match + ' score from chinese_docs where ' + match
+                            + '>0 order by score desc,id', (text, text))
+            for text in ['中华人民共和国中央人民政府 南京市长江大桥 研究生命起源', chinese[-1][2]]:
+                for detail in [False, True]:
+                    options = [{'additional_args': [{'ik_mode': mode}]}]
+                    if detail:
+                        options.append({'output': 'all'})
+                    capture(repr(('IK tokens', mode, text, detail)),
+                            'select tokenize(%s,%s,%s)', (text, 'ik', json.dumps(options)))
+            query("update chinese_docs set content='新的全文检索数据库内容' where id=1")
+            query('delete from chinese_docs where id=2')
+            capture(mode + ' Chinese mutations', "select id from chinese_docs where "
+                    "match(title,content) against('数据库 人民政府')>0 order by id")
+            query('drop table chinese_docs')
         result = {'checks': len(results), 'results': results}
         args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
         if args.compare:
