@@ -26,6 +26,18 @@ The definition suite also exercises LONGTEXT dependencies and READY NULL values.
 Results, source revision and executable SHA256 are written to
 `work/ai-column-validation` (override with `--output-dir`).
 
+Some macOS mysqltest distributions implement fractional `--real_sleep` waits
+using whole wall-clock seconds. In a local phase-controlled probe, a requested
+0.3-second wait completed in 0.084 to 0.107 seconds. That can update a row before
+the old HTTP request starts, so the public stale-response assertion cannot
+exercise the intended race. For such clients only, pass
+`--precise-fractional-sleeps`. The runner stages test copies under its disposable
+runtime and replaces only fractional sleep commands with Python `time.sleep`.
+SQL, mock services, assertions, expected results and the original test files
+remain unchanged. The summary explicitly records this compatibility mode,
+original source hashes and replacement counts. This is local timing-adapted
+validation, not a claim of an unmodified official run.
+
 To check AI function enhancement before other suites warm the database:
 
 ```sh

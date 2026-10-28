@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import pathlib
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -21,6 +23,10 @@ def main():
     parser.add_argument('--mysqltest', type=pathlib.Path, default=shutil.which('mysqltest'))
     parser.add_argument('--repo', type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[4])
     parser.add_argument('--output-dir', type=pathlib.Path, default=pathlib.Path.cwd() / 'work/ai-column-validation')
+    parser.add_argument('--precise-fractional-sleeps', action='store_true', help=(
+        'Local client compatibility: stage test copies using Python time.sleep for fractional '
+        '--real_sleep commands. Some macOS mysqltest builds round waits to wall-clock seconds. '
+        'Original test files, SQL, mocks, assertions and expected results are unchanged.'))
     args = parser.parse_args()
     if args.mysqltest is None:
         parser.error('mysqltest is required; pass --mysqltest /path/to/mysqltest')
@@ -40,6 +46,8 @@ def main():
             digest.update(chunk)
     summary = {'revision':revision, 'binary':str(args.binary), 'binary_sha256':digest.hexdigest(),
                'started_at':datetime.datetime.now().astimezone().isoformat(),
+               'public_timing':('python-fractional-sleep' if args.precise_fractional_sleeps
+                                else 'unmodified-mysqltest'),
                'public':[], 'regressions':[], 'passed':False, 'error':None}
     env = os.environ.copy()
     env['PATH'] = str(pathlib.Path(sys.executable).parent) + os.pathsep + env.get('PATH', '')
@@ -78,15 +86,31 @@ def main():
             connection.close()
             connection = None
             for case in CASES:
+                source = suite / 't' / (case + '.test')
+                test_file = source
+                replacements = 0
+                if args.precise_fractional_sleeps:
+                    # Only replace standalone fractional sleep commands, including
+                    # commands after an opening brace. Leave all SQL and assertions
+                    # byte-for-byte intact; mysqltest does not echo either command.
+                    staged, replacements = re.subn(
+                        r'--real_sleep[ \t]+([0-9]+\.[0-9]+)(?=[ \t]*$)',
+                        lambda match: '--exec ' + shlex.quote(sys.executable)
+                        + ' -c "import time; time.sleep(' + match[1] + ')"',
+                        source.read_text(), flags=re.MULTILINE)
+                    test_file = runtime / (case + '.test')
+                    test_file.write_text(staged)
                 command = [str(args.mysqltest), '--socket=' + str(runtime / 'run/sql.sock'), '-uroot',
-                    '--database=ai_column_public_validation', '--test-file=' + str(suite / 't' / (case + '.test')),
+                    '--database=ai_column_public_validation', '--test-file=' + str(test_file),
                     '--result-file=' + str(suite / 'r/mysql' / (case + '.result')),
                     '--logdir=' + str(runtime), '--tmpdir=' + str(runtime)]
                 result = subprocess.run(command, cwd=args.repo / 'tools/deploy', env=env,
                                         capture_output=True, text=True, timeout=240)
                 log = output / ('ai-column-ready-' + case + '.log')
                 log.write_text(result.stdout + result.stderr)
-                summary['public'].append({'name':case, 'returncode':result.returncode, 'log':str(log)})
+                summary['public'].append({'name':case, 'returncode':result.returncode, 'log':str(log),
+                    'source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
+                    'test_file':str(test_file), 'fractional_sleeps_replaced':replacements})
                 print(case, 'PASS' if result.returncode == 0 else 'FAIL', flush=True)
             stop_owned(server)
             server = None
