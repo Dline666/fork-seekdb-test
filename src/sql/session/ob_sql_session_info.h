@@ -596,6 +596,8 @@ public:
   void set_ai_column_internal(bool value) { ai_column_internal_ = value; }
   uint64_t get_ai_column_retry_id() const { return ai_column_retry_id_; }
   void set_ai_column_retry_id(uint64_t value) { ai_column_retry_id_ = value; }
+  bool has_ai_column_work_pending() const { return ai_column_work_pending_; }
+  void set_ai_column_work_pending(bool value) { ai_column_work_pending_ = value; }
 
   inline common::sqlclient::ObISQLConnection *get_inner_conn() { return inner_conn_; }
   inline void set_inner_conn(common::sqlclient::ObISQLConnection *inner_conn)
@@ -981,6 +983,7 @@ private:
   const transaction::ObTxReadSnapshot *ai_column_read_snapshot_;
   bool ai_column_internal_; // Kernel-only capability; never exposed as a SQL variable.
   uint64_t ai_column_retry_id_; // Kernel-only forced outbox target for RETRY.
+  bool ai_column_work_pending_; // Wake workers only after the outer transaction commits.
 
   ObSessionStat session_stat_;
 

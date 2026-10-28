@@ -142,6 +142,7 @@ ObSQLSessionInfo::ObSQLSessionInfo() :
       ai_column_read_snapshot_(nullptr),
       ai_column_internal_(false),
       ai_column_retry_id_(OB_INVALID_ID),
+      ai_column_work_pending_(false),
       enable_role_array_(),
       in_definer_named_proc_(false),
       priv_user_id_(OB_INVALID_ID),
@@ -293,6 +294,7 @@ void ObSQLSessionInfo::reset(bool skip_sys_var)
     ai_column_read_snapshot_ = nullptr;
     ai_column_internal_ = false;
     ai_column_retry_id_ = OB_INVALID_ID;
+    ai_column_work_pending_ = false;
     session_stat_.reset();
     cached_schema_guard_info_.reset();
     enable_role_array_.reset();
