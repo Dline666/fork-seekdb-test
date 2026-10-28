@@ -1,0 +1,39 @@
+{
+  "commit": "634888d9b037153fa143d2c913ba4b25503e1d62",
+  "rows": 10000,
+  "dim": 128,
+  "nq": 20,
+  "note": "Local deployment dataset only; not official SIFT250K or Hidden250K. Sequential CPU/GPU diagnostic, not official paired scoring.",
+  "results": {
+    "vsag": {
+      "build_seconds_including_first_query": 2.6664536483585835,
+      "queries": {
+        "10": {
+          "recall": 0.61,
+          "qps_including_mysql_client_startup": 166.80342046630403,
+          "p95_seconds_including_mysql_client_startup": 0.0069740209728479385
+        },
+        "100": {
+          "recall": 0.6475000000000001,
+          "qps_including_mysql_client_startup": 159.0781724907055,
+          "p95_seconds_including_mysql_client_startup": 0.0071020971052348615
+        }
+      }
+    },
+    "cuvs": {
+      "build_seconds_including_first_query": 6.553624352440238,
+      "queries": {
+        "10": {
+          "recall": 1.0,
+          "qps_including_mysql_client_startup": 76.47709495167842,
+          "p95_seconds_including_mysql_client_startup": 0.014010032732039691
+        },
+        "100": {
+          "recall": 1.0,
+          "qps_including_mysql_client_startup": 75.73565228367671,
+          "p95_seconds_including_mysql_client_startup": 0.013877102453261615
+        }
+      }
+    }
+  }
+}
