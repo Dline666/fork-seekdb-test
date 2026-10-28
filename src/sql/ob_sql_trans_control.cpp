@@ -28,6 +28,7 @@
 #include "common/storage/ob_sequence.h"
 #include "share/ob_server_struct.h"
 #include "sql/monitor/show_trace/ob_show_trace.h"
+#include "sql/engine/dml/ai_column_dispatch.h"
 
 #ifdef CHECK_SESSION
 #error "redefine macro CHECK_SESSION"
@@ -462,6 +463,8 @@ int ObSqlTransControl::do_end_trans_(ObSQLSessionInfo *session,
       }
     } else {
       if (OB_FAIL(txs->commit_tx(*tx_ptr, expire_ts))) {
+      } else if (session->has_ai_column_work_pending()) {
+        notify_ai_column_work_committed();
       }
     }
   }
@@ -1135,6 +1138,7 @@ int ObSqlTransControl::reset_session_tx_state(ObBasicSessionInfo *session,
 
 int ObSqlTransControl::reset_session_tx_state(ObSQLSessionInfo *session, bool reuse_tx_desc, bool reset_trans_variable)
 {
+  session->set_ai_column_work_pending(false);
   int temp_ret = OB_SUCCESS;
   // cleanup txn level temp tables if this is the txn start node
   ObTxDesc *tx_desc = session->get_tx_desc();

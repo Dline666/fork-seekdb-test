@@ -1,5 +1,6 @@
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/dml/ai_column_runtime.h"
+#include "sql/engine/dml/ai_column_dispatch.h"
 #include "sql/engine/dml/ob_table_modify_op.h"
 #include "sql/engine/dml/ob_dml_service.h"
 #include "sql/ob_sql_context.h"
@@ -392,6 +393,16 @@ int ai_publish(std::vector<AiTask> &tasks, const std::string &owner)
 }
 } // namespace
 
+void notify_ai_column_work_committed()
+{
+  ATOMIC_STORE(&ai_fast_dispatch_until, ObTimeUtility::current_time() + 2000000);
+  {
+    std::lock_guard<std::mutex> guard(ai_dispatch_mutex);
+    ATOMIC_AAF(&ai_dispatch_generation, 1);
+  }
+  ai_dispatch_condition.notify_all();
+}
+
 bool AiColumnRuntime::needs_processing(ObTableModifyOp &op, const ObDMLBaseCtDef &ctdef)
 {
   const ObSQLSessionInfo *session = op.get_exec_ctx().get_my_session();
@@ -477,12 +488,10 @@ int AiColumnRuntime::after_row(ObTableModifyOp &op, const ObDMLBaseCtDef &ctdef,
       session->set_ai_column_retry_id(saved_retry_id);
       if (OB_SUCC(ret)) { ret = end_ret; }
       if (OB_SUCC(ret)) {
-        ATOMIC_STORE(&ai_fast_dispatch_until, ObTimeUtility::current_time() + 2000000);
-        {
-          std::lock_guard<std::mutex> guard(ai_dispatch_mutex);
-          ATOMIC_AAF(&ai_dispatch_generation, 1);
-        }
-        ai_dispatch_condition.notify_all();
+        // A notification here races the outer commit: the worker can scan an
+        // empty committed outbox, then sleep through newly committed work.
+        // Both synchronous and asynchronous commit completion consume this hint.
+        session->set_ai_column_work_pending(true);
       }
     }
   }
@@ -498,14 +507,21 @@ void AiColumnWorker::run1()
     std::vector<AiTask> tasks;
     int ret = ai_claim(owner,tasks);
     if (OB_SUCC(ret) && !tasks.empty()) {
+      int64_t lease_refreshed_at = ObTimeUtility::current_time();
       bool terminal = true;
       for (AiTask &task : tasks) {
         if (has_set_stop()) { break; }
         if (task.state != 4 && task.state != 5) {
-          int64_t affected = 0;
-          ret = ai_write(*GCTX.sql_proxy_,"UPDATE oceanbase.__all_ai_column_task SET lease_until=DATE_ADD(now(6),INTERVAL 120 SECOND) "
-            "WHERE request_id=" + ai_literal(task.request) + " AND owner_id=" + ai_literal(owner) + " AND lease_until>now(6)",&affected);
-          if (OB_FAIL(ret) || affected != static_cast<int64_t>(tasks.size())) { ret = OB_STATE_NOT_MATCH; break; }
+          // Claim already committed a 120-second lease for the whole group.
+          // Renew only when needed, rather than putting another write and
+          // commit between every claimed task and its first model request.
+          if (ObTimeUtility::current_time() - lease_refreshed_at >= 30000000) {
+            int64_t affected = 0;
+            ret = ai_write(*GCTX.sql_proxy_,"UPDATE oceanbase.__all_ai_column_task SET lease_until=DATE_ADD(now(6),INTERVAL 120 SECOND) "
+              "WHERE request_id=" + ai_literal(task.request) + " AND owner_id=" + ai_literal(owner) + " AND lease_until>now(6)",&affected);
+            if (OB_FAIL(ret) || affected != static_cast<int64_t>(tasks.size())) { ret = OB_STATE_NOT_MATCH; break; }
+            lease_refreshed_at = ObTimeUtility::current_time();
+          }
           const int execute_ret = ai_execute(task);
           if (OB_FAIL(ai_save_task(task,owner,execute_ret == OB_SUCCESS))) { break; }
         }
@@ -520,6 +536,8 @@ void AiColumnWorker::run1()
     if (ret != OB_SUCCESS && ret != OB_ITER_END && REACH_TIME_INTERVAL(1000000)) {
       LOG_WARN("AI column worker will retry persisted work", K(ret));
     }
+    // Drain runnable groups without imposing an artificial delay on backlog.
+    if (!tasks.empty()) { continue; }
     // Poll promptly after a producer signals new work. Idle databases retain
     // the lower scan rate so the worker does not tax unrelated SQL workloads.
     const bool active = !tasks.empty() ||

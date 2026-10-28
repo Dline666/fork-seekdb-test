@@ -18,6 +18,7 @@
 
 #include "sql/ob_mysql_end_trans_cb.h"
 #include "sql/session/ob_piece_cache.h"
+#include "sql/engine/dml/ai_column_dispatch.h"
 using namespace oceanbase::common;
 using namespace oceanbase::obmysql;
 namespace oceanbase
@@ -235,6 +236,9 @@ void ObSqlEndTransCb::complete_callback_locked(int cb_param,
                                                 uint32_t &sessid)
 {
   sessid = session_info->get_server_sid();
+  if (OB_SUCCESS == cb_param && session_info->has_ai_column_work_pending()) {
+    sql::notify_ai_column_work_committed();
+  }
   const bool reuse_tx = OB_SUCCESS == cb_param
       || OB_TRANS_COMMITED == cb_param
       || OB_TRANS_ROLLBACKED == cb_param;
@@ -299,6 +303,9 @@ void ObSqlEndTransCb::complete_aborted_callback_locked(
     uint32_t &sessid)
 {
   sessid = session_info->get_server_sid();
+  if (OB_SUCCESS == cb_param && session_info->has_ai_column_work_pending()) {
+    sql::notify_ai_column_work_committed();
+  }
   const bool reuse_tx = OB_SUCCESS == cb_param
       || OB_TRANS_COMMITED == cb_param
       || OB_TRANS_ROLLBACKED == cb_param;
