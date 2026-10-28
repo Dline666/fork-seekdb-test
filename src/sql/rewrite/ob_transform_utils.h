@@ -2045,6 +2045,14 @@ private:
                                               ObRawExpr* match_expr, 
                                               bool &need_calc,
                                               ObIArray<ObExprConstraint> &constraints);
+public:
+  static int check_need_calc_match_score(ObExecContext *exec_ctx,
+                                        const ObDMLStmt *stmt,
+                                        ObMatchFunRawExpr *match_expr,
+                                        ObRawExpr *removed_predicate,
+                                        bool &need_calc,
+                                        ObIArray<ObExprConstraint> &constraints);
+private:
   static int check_stmt_can_trans_as_exists(ObSelectStmt *stmt,
                                             ObTransformerCtx *ctx,
                                             bool is_correlated,

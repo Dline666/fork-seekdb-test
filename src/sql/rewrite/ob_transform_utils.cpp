@@ -12804,6 +12804,57 @@ bool ObTransformUtils::is_full_group_by(ObSelectStmt& stmt, ObSQLMode mode)
   return !stmt.has_order_by() && is_only_full_group_by_on(mode);
 }
 
+int ObTransformUtils::check_need_calc_match_score(ObExecContext *exec_ctx,
+                                                const ObDMLStmt *stmt,
+                                                ObMatchFunRawExpr *match_expr,
+                                                ObRawExpr *removed_predicate,
+                                                bool &need_calc,
+                                                ObIArray<ObExprConstraint> &constraints)
+{
+  int ret = OB_SUCCESS;
+  need_calc = true;
+  ObSEArray<ObRawExpr *, 16> other_exprs;
+  ObStmtExprGetter visitor;
+  visitor.set_relation_scope();
+  visitor.remove_scope(SCOPE_WHERE);
+  bool predicate_needs_score = true;
+  bool other_use = false;
+  if (OB_ISNULL(stmt) || OB_ISNULL(match_expr) || OB_ISNULL(removed_predicate)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (match_expr->get_mode_flag() != NATURAL_LANGUAGE_MODE
+      || !match_expr->get_columns_boosts().empty() || stmt->get_subquery_expr_size() != 0
+      || (stmt->is_select_stmt() && static_cast<const ObSelectStmt *>(stmt)->has_window_function())) {
+    // Boolean/phrase/expansion scores and correlated uses keep their existing
+    // path. Only the positive natural-language existence predicate is removed.
+  } else if (!((removed_predicate->get_expr_type() == T_OP_BOOL
+                 && removed_predicate->get_param_count() == 1
+                 && removed_predicate->get_param_expr(0) == match_expr)
+             || (removed_predicate->get_expr_type() == T_OP_GT
+                 && removed_predicate->get_param_count() == 2
+                 && removed_predicate->get_param_expr(0) == match_expr)
+             || (removed_predicate->get_expr_type() == T_OP_LT
+                 && removed_predicate->get_param_count() == 2
+                 && removed_predicate->get_param_expr(1) == match_expr))) {
+  } else if (OB_FAIL(inner_check_need_calc_match_score(exec_ctx, removed_predicate,
+                                                        match_expr, predicate_needs_score, constraints))) {
+  } else if (predicate_needs_score) {
+  } else if (OB_FAIL(stmt->get_relation_exprs(other_exprs, visitor))) {
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && !other_use && i < other_exprs.count(); ++i) {
+      if (OB_FAIL(ObRawExprUtils::find_expr(other_exprs.at(i), match_expr, other_use))) {
+      }
+    }
+    const ObIArray<ObRawExpr *> &conditions = stmt->get_condition_exprs();
+    for (int64_t i = 0; OB_SUCC(ret) && !other_use && i < conditions.count(); ++i) {
+      if (conditions.at(i) != removed_predicate
+          && OB_FAIL(ObRawExprUtils::find_expr(conditions.at(i), match_expr, other_use))) {
+      }
+    }
+    if (OB_SUCC(ret) && !other_use) need_calc = false;
+  }
+  return ret;
+}
+
 int ObTransformUtils::inner_check_need_calc_match_score(ObExecContext *exec_ctx,
                                                         ObRawExpr* expr, 
                                                         ObRawExpr* match_expr, 

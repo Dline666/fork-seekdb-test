@@ -12073,12 +12073,27 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
     ObTextRetrievalInfo &tr_info = table_scan->get_text_retrieval_info();
     tr_info.match_expr_ = match_against;
     tr_info.pushdown_match_filter_ = match_pred;
+    ObSEArray<ObExprConstraint, 2> score_constraints;
+    bool need_score = true;
+    if (table_scan->is_vec_adaptive_scan() || table_scan->is_vec_idx_scan_post_filter()) {
+    } else if (OB_FAIL(ObTransformUtils::check_need_calc_match_score(get_optimizer_context().get_exec_ctx(),
+          get_stmt(), match_against, match_pred, need_score, score_constraints))) {
+    } else if (!need_score && OB_FAIL(append_array_no_dup(
+          get_optimizer_context().get_query_ctx()->all_expr_constraints_, score_constraints))) {
+    } else if (!need_score) {
+      // Every posting has a strictly positive natural-language BM25 score.
+      // The removed BOOL/>0 predicate is therefore exactly posting existence;
+      // no numeric MATCH result is produced or substituted on this path.
+      tr_info.need_calc_relevance_ = false;
+      tr_info.pushdown_match_filter_ = nullptr;
+    }
     // The mapping table is absent when the data-table rowkey is used as the document ID.
     table_scan->set_doc_id_index_table_id(tr_info.doc_id_idx_tid_);
     if (table_scan->is_vec_adaptive_scan() || table_scan->is_vec_idx_scan_post_filter()) {
       table_scan->set_rowkey_doc_table_id(tr_info.rowkey_idx_tid_);
     }
-    if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.doc_id_idx_tid_ == OB_INVALID_ID))) {
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.doc_id_idx_tid_ == OB_INVALID_ID))) {
     } else if (OB_FAIL(table_scan->set_is_skip_rowkey_doc(tr_info.rowkey_idx_tid_ == OB_INVALID_ID))) {
     }
   }
