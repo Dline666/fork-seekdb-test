@@ -12,6 +12,9 @@
 #include <string>
 #include <vector>
 #include <cstdlib>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 
 namespace oceanbase {
 using namespace common;
@@ -20,6 +23,9 @@ using namespace share::schema;
 namespace sql {
 namespace {
 int64_t ai_fast_dispatch_until = 0;
+int64_t ai_dispatch_generation = 0;
+std::mutex ai_dispatch_mutex;
+std::condition_variable ai_dispatch_condition;
 std::string ai_text(const ObString &s) { return std::string(s.ptr() == nullptr ? "" : s.ptr(), s.length()); }
 std::string ai_ident(const ObString &s)
 {
@@ -472,6 +478,11 @@ int AiColumnRuntime::after_row(ObTableModifyOp &op, const ObDMLBaseCtDef &ctdef,
       if (OB_SUCC(ret)) { ret = end_ret; }
       if (OB_SUCC(ret)) {
         ATOMIC_STORE(&ai_fast_dispatch_until, ObTimeUtility::current_time() + 2000000);
+        {
+          std::lock_guard<std::mutex> guard(ai_dispatch_mutex);
+          ATOMIC_AAF(&ai_dispatch_generation, 1);
+        }
+        ai_dispatch_condition.notify_all();
       }
     }
   }
@@ -483,6 +494,7 @@ void AiColumnWorker::run1()
   lib::set_thread_name("AIColumnWorker");
   const std::string owner = ai_request_id() + "-" + std::to_string(get_thread_idx());
   while (!has_set_stop()) {
+    const int64_t dispatch_generation = ATOMIC_LOAD(&ai_dispatch_generation);
     std::vector<AiTask> tasks;
     int ret = ai_claim(owner,tasks);
     if (OB_SUCC(ret) && !tasks.empty()) {
@@ -512,7 +524,9 @@ void AiColumnWorker::run1()
     // the lower scan rate so the worker does not tax unrelated SQL workloads.
     const bool active = !tasks.empty() ||
         ObTimeUtility::current_time() < ATOMIC_LOAD(&ai_fast_dispatch_until);
-    ob_usleep(active ? 20000 : 100000);
+    std::unique_lock<std::mutex> dispatch_guard(ai_dispatch_mutex);
+    ai_dispatch_condition.wait_for(dispatch_guard, std::chrono::microseconds(active ? 20000 : 100000),
+        [dispatch_generation] { return ATOMIC_LOAD(&ai_dispatch_generation) != dispatch_generation; });
   }
 }
 } // namespace sql
