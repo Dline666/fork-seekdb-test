@@ -18,6 +18,7 @@
 #define _OCEANBASE_STORAGE_FTS_IK_OB_IK_CJK_PROCESSOR_H_
 
 #include "lib/allocator/ob_allocator.h"
+#include "lib/container/ob_se_array.h"
 #include "storage/fts/dict/ob_ft_dict.h"
 #include "storage/fts/ik/ob_ik_processor.h"
 
@@ -30,7 +31,8 @@ class ObIKCJKProcessor : public ObIIKProcessor
 {
 public:
   ObIKCJKProcessor(const ObIFTDict &dict_main, ObIAllocator &alloc)
-      : hits_(alloc), dict_main_(dict_main), cjk_start_(-1), cjk_end_(-1)
+      : hits_(common::OB_MALLOC_NORMAL_BLOCK_SIZE, common::ModulePageAllocator(alloc, "IKActiveHits")),
+        dict_main_(dict_main), cjk_start_(-1), cjk_end_(-1)
   {
   }
   ~ObIKCJKProcessor() override { hits_.reset(); }
@@ -42,7 +44,22 @@ public:
                  const ObFTCharUtil::CharType type) override;
 
 private:
-  ObList<ObDATrieHit, ObIAllocator> hits_;
+  // The array interface requires default construction. Keep its copies complete
+  // even though ObDATrieHit's cursor-only assignment does not copy dict_.
+  struct ActiveHit
+  {
+    ActiveHit() : hit_(nullptr, 0) {}
+    ActiveHit(const ObDATrieHit &hit) : hit_(hit) {}
+    ActiveHit(const ActiveHit &hit) : hit_(hit.hit_) {}
+    ActiveHit &operator=(const ActiveHit &hit)
+    {
+      hit_ = hit.hit_;
+      hit_.dict_ = hit.hit_.dict_;
+      return *this;
+    }
+    ObDATrieHit hit_;
+  };
+  common::ObSEArray<ActiveHit, 8> hits_;
   const ObIFTDict &dict_main_;
   int64_t cjk_start_;
   int64_t cjk_end_;

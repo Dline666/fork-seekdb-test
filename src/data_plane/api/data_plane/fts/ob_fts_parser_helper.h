@@ -161,6 +161,12 @@ public:
       common::ObIAllocator *allocator,
       const common::ObString &parser_name,
       const common::ObString &parser_properties);
+  // Initialize from an already validated parser and typed configuration. The
+  // property string fields must outlive this helper, as with the string API.
+  int init(
+      common::ObIAllocator *allocator,
+      const ObFTParser &parser,
+      const ObFTParserProperty &parser_property);
   /**
    * Split document into multiple words
    *

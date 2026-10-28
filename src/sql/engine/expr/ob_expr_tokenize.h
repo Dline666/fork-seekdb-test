@@ -22,6 +22,7 @@
 #include "lib/string/ob_string.h"
 #include "sql/engine/expr/ob_expr_operator.h"
 #include "data_plane/fts/ob_fts_parser_property.h"
+#include "data_plane/fts/ob_fts_parser_helper.h"
 
 namespace oceanbase
 {
@@ -71,6 +72,8 @@ private:
     mutable ObArenaAllocator allocator_;
     ObString parser_name_;
     ObString properties_;
+    storage::ObFTParser parsed_parser_;
+    bool use_default_properties_;
     ObObjMeta meta_;
     ObString fulltext_;
     enum OUTPUT_MODE

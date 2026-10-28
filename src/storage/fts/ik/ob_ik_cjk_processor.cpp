@@ -37,11 +37,12 @@ int ObIKCJKProcessor::do_process(TokenizeContext &ctx,
   int ret = OB_SUCCESS;
 
   if (ObFTCharUtil::CharType::USELESS != type) {
-    // handle previous hits_ first and then check from this char
-    for (ObList<ObDATrieHit, ObIAllocator>::iterator iter = hits_.begin();
-         OB_SUCC(ret) && iter != hits_.end();
-         iter++) {
-      ObDATrieHit &hit = *iter;
+    // Compact surviving prefixes in place, retaining their original order.
+    // A character extends every old prefix before starting its own prefix.
+    int64_t surviving_count = 0;
+    const int64_t previous_count = hits_.count();
+    for (int64_t i = 0; OB_SUCC(ret) && i < previous_count; ++i) {
+      ObDATrieHit &hit = hits_.at(i).hit_;
       if (OB_FAIL(dict_main_.match_with_hit({char_len, ch}, hit, hit))) {
       } else if (hit.is_match()) {
         if (OB_FAIL(ctx.add_token(ctx.fulltext(),
@@ -55,41 +56,55 @@ int ObIKCJKProcessor::do_process(TokenizeContext &ctx,
       } else if (hit.is_prefix()) {
         // nothing
       } else if (hit.is_unmatch()) {
-        hits_.erase(hit);
+        // This prefix is omitted from the compacted array.
       } else {
         ret = OB_UNEXPECT_INTERNAL_ERROR;
       }
+      if (OB_SUCC(ret) && !hit.is_unmatch()) {
+        if (surviving_count != i) {
+          ObDATrieHit &destination = hits_.at(surviving_count).hit_;
+          destination = hit;
+          // ObDATrieHit assignment copies the cursor but deliberately leaves
+          // dict_ unchanged. A moved prefix must keep its original DAT range.
+          destination.dict_ = hit.dict_;
+        }
+        ++surviving_count;
+      }
     }
     if (OB_SUCC(ret)) {
+      while (hits_.count() > surviving_count) {
+        hits_.pop_back();
+      }
       // Start from this char
       // find range of dict
       ObDATrieHit hit(&dict_main_, ctx.get_cursor());
       if (OB_FAIL(dict_main_.match({char_len, ch}, hit))) {
       } else if (hit.is_match()) {
         // output token
-        hits_.push_back(hit);
-        ctx.add_token(ctx.fulltext(),
+        if (OB_FAIL(hits_.push_back(hit))) {
+        } else if (OB_FAIL(ctx.add_token(ctx.fulltext(),
                       ctx.get_cursor(),
                       char_len,
                       1,
-                      ObIKTokenType::IK_CHINESE_TOKEN);
+                      ObIKTokenType::IK_CHINESE_TOKEN))) {
+        }
       } else if (hit.is_prefix()) {
-        hits_.push_back(hit);
+        ret = hits_.push_back(hit);
       } else {
         // ignore mismatch
       }
     }
   } else {
     // stop previous match
-    hits_.clear();
+    hits_.reuse();
   }
 
   if (OB_SUCC(ret)) {
     if (ctx.is_last()) {
-      hits_.clear();
+      hits_.reuse();
     }
   } else {
-    hits_.clear();
+    hits_.reuse();
   }
 
   return ret;
