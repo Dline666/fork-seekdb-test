@@ -382,7 +382,25 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
 {
   int ret = OB_SUCCESS;
   bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
+  if (ranges_ordered_) {
+    int64_t left = 0;
+    int64_t right = range_dicts_.size();
+    // Find the first range whose inclusive end is not below this character.
+    while (left < right) {
+      const int64_t middle = left + (right - left) / 2;
+      if (range_dicts_[middle].end_.get_word().compare(single_word) < 0) {
+        left = middle + 1;
+      } else {
+        right = middle;
+      }
+    }
+    if (left < range_dicts_.size()
+        && range_dicts_[left].start_.get_word().compare(single_word) <= 0) {
+      dict = range_dicts_[left].dict_;
+      found = true;
+    }
+  }
+  for (int i = 0; !ranges_ordered_ && OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
     // Ranges have always used UTF8MB4_BIN's non-padding comparison. Its
     // comparator (ob_strnncoll_mb_bin) is exactly memcmp plus a length tie
     // break, as is ObString::compare. Avoid repeating charset validation and
@@ -403,6 +421,7 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
 int ObFTRangeDict::build_dict_from_cache(const ObFTCacheRangeContainer &range_container)
 {
   int ret = OB_SUCCESS;
+  ranges_ordered_ = false;
   for (ObList<ObFTCacheRangeHandle *, ObIAllocator>::const_iterator iter = range_container.get_handles().begin();
        OB_SUCC(ret) && iter != range_container.get_handles().end();
        iter++) {
@@ -419,6 +438,20 @@ int ObFTRangeDict::build_dict_from_cache(const ObFTCacheRangeContainer &range_co
       if (OB_FAIL(range_dicts_.push_back(range))) {
       }
     }
+  }
+  if (OB_SUCC(ret)) {
+    bool ordered = true;
+    for (int64_t i = 0; ordered && i < range_dicts_.size(); ++i) {
+      const ObFTRange &range = range_dicts_[i];
+      ordered = !range.start_.get_word().empty()
+                && !range.end_.get_word().empty()
+                && range.start_.get_word().compare(range.end_.get_word()) <= 0;
+      if (ordered && i > 0) {
+        ordered = range_dicts_[i - 1].end_.get_word().compare(range.start_.get_word()) < 0;
+      }
+    }
+    // Preserve first-match behavior for unsorted, overlapping or invalid ranges.
+    ranges_ordered_ = ordered;
   }
   return ret;
 }

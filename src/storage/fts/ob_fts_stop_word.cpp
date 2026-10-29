@@ -57,18 +57,61 @@ int ObStopWordChecker::init()
     }
 
     if (OB_SUCC(ret)) {
+      init_ascii_stopwords();
       inited_ = true;
     }
+  }
+  if (OB_FAIL(ret) && ret != OB_INIT_TWICE) {
+    destroy();
   }
   return ret;
 }
 
+bool ObStopWordChecker::pack_ascii_letters(const common::ObString &word, uint64_t &key)
+{
+  key = 0;
+  bool letters = word.length() > 0;
+  for (int64_t i = 0; letters && i < word.length(); ++i) {
+    const unsigned char lower = static_cast<unsigned char>(word.ptr()[i]) | 0x20;
+    if (lower < 'a' || lower > 'z') {
+      letters = false;
+    } else if (i < 8) {
+      key |= static_cast<uint64_t>(lower) << (8 * i);
+    }
+  }
+  return letters;
+}
+
+void ObStopWordChecker::init_ascii_stopwords()
+{
+  MEMSET(ascii_stopwords_, 0, sizeof(ascii_stopwords_));
+  max_ascii_length_ = 0;
+  ascii_ready_ = true;
+  for (int64_t i = 0; ascii_ready_ && i < ARRAYSIZEOF(ob_stop_word_list); ++i) {
+    const common::ObString word(static_cast<int32_t>(STRLEN(ob_stop_word_list[i])), ob_stop_word_list[i]);
+    uint64_t key = 0;
+    if (word.length() > 8 || !pack_ascii_letters(word, key)) {
+      // A future non-ASCII entry can compare equal to ASCII under general_ci.
+      // Fall back for every token if the complete list cannot be represented.
+      ascii_ready_ = false;
+    } else {
+      max_ascii_length_ = MAX(max_ascii_length_, word.length());
+      int64_t bucket = ascii_bucket(key);
+      while (ascii_stopwords_[bucket] != 0 && ascii_stopwords_[bucket] != key) {
+        bucket = (bucket + 1) & (ASCII_STOPWORD_BUCKET_NUM - 1);
+      }
+      ascii_stopwords_[bucket] = key;
+    }
+  }
+}
+
 void ObStopWordChecker::destroy()
 {
-  if (inited_) {
-    stopword_set_.destroy();
-    inited_ = false;
-  }
+  stopword_set_.destroy();
+  inited_ = false;
+  ascii_ready_ = false;
+  max_ascii_length_ = 0;
+  MEMSET(ascii_stopwords_, 0, sizeof(ascii_stopwords_));
 }
 
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
@@ -91,6 +134,18 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
                                        stopword_type_.get_collation_type(),
                                        cmp_str))) {
     } else {
+      uint64_t key = 0;
+      if (ascii_ready_ && pack_ascii_letters(cmp_str, key)) {
+        is_stopword = false;
+        if (cmp_str.length() <= max_ascii_length_) {
+          int64_t bucket = ascii_bucket(key);
+          while (ascii_stopwords_[bucket] != 0 && ascii_stopwords_[bucket] != key) {
+            bucket = (bucket + 1) & (ASCII_STOPWORD_BUCKET_NUM - 1);
+          }
+          is_stopword = ascii_stopwords_[bucket] == key;
+        }
+        return OB_SUCCESS;
+      }
       ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
       ret = stopword_set_.exist_refactored(converted);
       if (OB_HASH_NOT_EXIST == ret) {

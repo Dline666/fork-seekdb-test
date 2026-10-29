@@ -82,12 +82,23 @@ public:
 
 private:
   static const int64_t DEFAULT_STOPWORD_BUCKET_NUM = 37L;
+  static const int64_t ASCII_STOPWORD_BUCKET_NUM = 128;
+  static bool pack_ascii_letters(const common::ObString &word, uint64_t &key);
+  static int64_t ascii_bucket(const uint64_t key)
+  {
+    return (key * 0x9e3779b97f4a7c15ULL) >> 57;
+  }
+  void init_ascii_stopwords();
   typedef common::hash::ObHashSet<storage::ObFTWord> StopWordSet;
 
   StopWordSet stopword_set_;
   ObObjMeta stopword_type_;
 
   bool inited_ = false;
+  // Built before publication in init(), then read without mutation or locks.
+  uint64_t ascii_stopwords_[ASCII_STOPWORD_BUCKET_NUM] = {};
+  int64_t max_ascii_length_ = 0;
+  bool ascii_ready_ = false;
 
   static_assert(sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]) <= DEFAULT_STOPWORD_BUCKET_NUM,
               "ob_stop_word_list's number shouldn't be greater than DEFAULT_STOPWORD_BUCKET_NUM");
