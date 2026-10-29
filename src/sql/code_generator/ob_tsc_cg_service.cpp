@@ -1894,11 +1894,17 @@ int ObTscCgService::generate_text_ir_ctdef(const ObLogTableScan &op,
 
   if (OB_SUCC(ret)) {
     root_ctdef = ir_scan_ctdef;
-    // A scan with no output values or remaining filters supplies row counts
-    // to its parent. It still merges actual posting IDs under the same read
-    // snapshot, but does not need to materialize those IDs as output datums.
+    // Literal outputs evaluate independently of scan values. The scan still
+    // merges actual posting IDs under the same read snapshot, but need not
+    // materialize those IDs for a parent that consumes only row counts/literals.
+    bool literal_outputs_only = true;
+    for (int64_t i = 0; literal_outputs_only && i < op.get_output_exprs().count(); ++i) {
+      const ObRawExpr *output_expr = op.get_output_exprs().at(i);
+      literal_outputs_only = output_expr != nullptr && output_expr->is_const_raw_expr()
+          && output_expr->get_expr_type() != T_QUESTIONMARK;
+    }
     const bool cardinality_only = !tr_info.need_calc_relevance_
-        && tr_info.pushdown_match_filter_ == nullptr && op.get_output_exprs().empty()
+        && tr_info.pushdown_match_filter_ == nullptr && literal_outputs_only
         && !op.get_index_back() && op.get_filter_exprs().empty()
         && op.get_pushdown_filter_exprs().empty() && !cg_ctx.is_func_lookup_
         && !cg_ctx.is_vec_iter_func_lookup_ && !cg_ctx.is_es_match_
@@ -2330,6 +2336,8 @@ int ObTscCgService::extract_text_ir_access_columns(
     ObIArray<ObRawExpr*> &access_exprs)
 {
   int ret = OB_SUCCESS;
+  const bool need_score_columns = tr_info.need_calc_relevance_
+      || tr_info.pushdown_match_filter_ != nullptr || tr_info.need_sort();
   if (OB_UNLIKELY(op.need_skip_rowkey_doc() &&
       (scan_ctdef.ref_table_id_ == op.get_doc_id_index_table_id() || scan_ctdef.ref_table_id_ == op.get_rowkey_doc_table_id()))) {
     ret = OB_ERR_UNEXPECTED;
@@ -2338,9 +2346,11 @@ int ObTscCgService::extract_text_ir_access_columns(
   } else {
     switch (scan_ctdef.ir_scan_type_) {
     case ObTSCIRScanType::OB_IR_INV_IDX_SCAN:
-      if (OB_FAIL(add_var_to_array_no_dup(access_exprs, static_cast<ObRawExpr*>(tr_info.token_cnt_column_)))) {
+      // Existence-only retrieval merges real IDs without consuming BM25 inputs.
+      // Keep this list aligned with extract_text_ir_das_output_column_ids.
+      if (need_score_columns && OB_FAIL(add_var_to_array_no_dup(access_exprs, static_cast<ObRawExpr*>(tr_info.token_cnt_column_)))) {
       } else if (OB_FAIL(add_var_to_array_no_dup(access_exprs, static_cast<ObRawExpr*>(tr_info.docid_or_rowkey_column_)))) {
-      } else if (OB_FAIL(add_var_to_array_no_dup(access_exprs, static_cast<ObRawExpr*>(tr_info.doc_length_column_)))) {
+      } else if (need_score_columns && OB_FAIL(add_var_to_array_no_dup(access_exprs, static_cast<ObRawExpr*>(tr_info.doc_length_column_)))) {
       }
       break;
     case ObTSCIRScanType::OB_IR_DOC_ID_IDX_AGG:
@@ -2696,12 +2706,14 @@ int ObTscCgService::extract_text_ir_das_output_column_ids(
     ObIArray<uint64_t> &output_cids)
 {
   int ret = OB_SUCCESS;
+  const bool need_score_columns = tr_info.need_calc_relevance_
+      || tr_info.pushdown_match_filter_ != nullptr || tr_info.need_sort();
   if (ObTSCIRScanType::OB_IR_INV_IDX_SCAN == scan_ctdef.ir_scan_type_) {
-    if (OB_FAIL(output_cids.push_back(
+    if (need_score_columns && OB_FAIL(output_cids.push_back(
         static_cast<ObColumnRefRawExpr *>(tr_info.token_cnt_column_)->get_column_id()))) {
     } else if (OB_FAIL(output_cids.push_back(
         static_cast<ObColumnRefRawExpr *>(tr_info.docid_or_rowkey_column_)->get_column_id()))) {
-    } else if (OB_FAIL(output_cids.push_back(
+    } else if (need_score_columns && OB_FAIL(output_cids.push_back(
         static_cast<ObColumnRefRawExpr *>(tr_info.doc_length_column_)->get_column_id()))) {
     }
   }

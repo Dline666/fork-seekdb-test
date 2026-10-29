@@ -25,6 +25,22 @@ namespace oceanbase
 namespace blocksstable
 {
 using namespace common;
+
+namespace
+{
+// Constant-sized memcpy remains safe for unaligned cell and output addresses.
+OB_INLINE void copy_string_diff_bytes(char *dst, const void *src, const int64_t length)
+{
+  switch (length) {
+    case 1: MEMCPY(dst, src, 1); break;
+    case 2: MEMCPY(dst, src, 2); break;
+    case 4: MEMCPY(dst, src, 4); break;
+    case 8: MEMCPY(dst, src, 8); break;
+    case 16: MEMCPY(dst, src, 16); break;
+    default: MEMCPY(dst, src, length); break;
+  }
+}
+} // namespace
 const ObColumnHeader::Type ObStringDiffDecoder::type_;
 
 ObStringDiffDecoder::ObStringDiffDecoder() : header_(NULL)
@@ -159,6 +175,7 @@ int ObStringDiffDecoder::batch_decode(
 
     // Fill string data
     const uint16_t string_size = header_->string_size_;
+    const bool fixed_plain = ctx.is_fix_length() && !header_->is_hex_packing();
     const static uint16_t min_buf_size = 128;
     const int64_t buf_size = std::max(string_size, min_buf_size);
     char *buf = nullptr;
@@ -175,11 +192,40 @@ int ObStringDiffDecoder::batch_decode(
       header_->copy_string(ObStringDiffHeader::LeftToRight(), std::logical_not<uint8_t>(),
           header_->common_data(), buf);
       for (int64_t i = 1; i < row_cap; ++i) {
-        MEMCPY(buf + i * buf_size, buf, string_size);
+        if (fixed_plain) {
+          copy_string_diff_bytes(buf + i * buf_size, buf, string_size);
+        } else {
+          MEMCPY(buf + i * buf_size, buf, string_size);
+        }
       }
     }
 
     if (OB_FAIL(ret)) {
+    } else if (fixed_plain) {
+      // Interpret each difference descriptor once for the entire batch. ppos
+      // addresses only the packed differences; fpos includes common segments.
+      int64_t ppos = 0;
+      int64_t fpos = 0;
+      for (int64_t segment = 0; segment < header_->diff_desc_cnt_; ++segment) {
+        const int64_t length = header_->diff_descs_[segment].count_;
+        if (header_->diff_descs_[segment].diff_) {
+          for (int64_t i = 0; i < row_cap; ++i) {
+            if (!ctx.has_extend_value() || !datums[i].is_null()) {
+              const unsigned char *src = col_data + data_offset
+                  + static_cast<int64_t>(row_ids[i]) * header_->length_ + ppos;
+              copy_string_diff_bytes(buf + i * buf_size + fpos, src, length);
+            }
+          }
+          ppos += length;
+        }
+        fpos += length;
+      }
+      for (int64_t i = 0; i < row_cap; ++i) {
+        if (!ctx.has_extend_value() || !datums[i].is_null()) {
+          datums[i].pack_ = string_size;
+          datums[i].ptr_ = buf + i * buf_size;
+        }
+      }
     } else if (ctx.is_fix_length()) {
       int64_t row_id = 0;
       const unsigned char *cell_data = nullptr;
