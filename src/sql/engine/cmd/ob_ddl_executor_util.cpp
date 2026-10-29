@@ -58,7 +58,9 @@ int ObDDLExecutorUtil::wait_ddl_finish(const int64_t task_id,
     const bool is_support_cancel)
 {
   int ret = OB_SUCCESS;
-  const int64_t retry_interval = 100 * 1000;
+  // The finish record is one point lookup on an inner table; poll it at the
+  // scheduler's own 10ms cadence so short DDLs return without a 100ms tail.
+  const int64_t retry_interval = 10 * 1000;
   ObAddr unused_addr;
   bool is_table_exist = false;
   int64_t unused_user_msg_len = 0;
