@@ -103,7 +103,9 @@ int cudaMemcpy(void *to, const void *from, size_t n, int)
 {
   assert(!pending_work);
   if (graph_views) { ++graph_copies; largest_graph_copy = std::max(largest_graph_copy, n); }
-  if (bad("copy")) return 1; std::memcpy(to, from, n); return cudaSuccess;
+  if (bad("copy")) { return 1; }
+  std::memcpy(to, from, n);
+  return cudaSuccess;
 }
 cuvsError_t cuvsCagraSearch(cuvsResources_t, cuvsCagraSearchParams_t p, cuvsCagraIndex_t idx,
                            DLManagedTensor *q, DLManagedTensor *neighbors, DLManagedTensor *distances, cuvsFilter f)
