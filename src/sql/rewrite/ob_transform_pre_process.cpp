@@ -178,7 +178,8 @@ int ObTransformPreProcess::transform_one_stmt(common::ObIArray<ObParentDMLStmt> 
       }
     }
     if (OB_SUCC(ret)) {
-      if (stmt->get_match_exprs().count() > 0 &&
+      if (stmt->get_match_exprs().count() > 0
+          && !fulltext_rows_consumed_only_by_count(parent_stmts, stmt) &&
           OB_FAIL(preserve_order_for_fulltext_search(stmt, is_happened))) {
       } else {
         trans_happened |= is_happened;
@@ -3786,6 +3787,51 @@ int ObTransformPreProcess::do_flatten_conditions(ObDMLStmt *stmt, ObIArray<ObRaw
     OPT_TRACE("   flatten_happend:", flatten_happend);
   }
   return ret;
+}
+
+bool ObTransformPreProcess::fulltext_rows_consumed_only_by_count(
+    const ObIArray<ObParentDMLStmt> &parent_stmts, const ObDMLStmt *stmt)
+{
+  bool count_only = false;
+  if (nullptr != stmt && stmt->is_select_stmt() && !parent_stmts.empty()) {
+    const ObSelectStmt *child = static_cast<const ObSelectStmt *>(stmt);
+    const ObDMLStmt *parent_stmt = parent_stmts.at(parent_stmts.count() - 1).stmt_;
+    if (nullptr != parent_stmt && parent_stmt->is_select_stmt()) {
+      const ObSelectStmt *parent = static_cast<const ObSelectStmt *>(parent_stmt);
+      if (!child->is_set_stmt() && !child->is_calc_found_rows()
+          && !child->has_order_by() && child->get_subquery_expr_size() == 0
+          && !parent->is_set_stmt() && parent->get_table_size() == 1
+          && parent->get_from_item_size() == 1 && parent->get_joined_tables().empty()
+          && parent->get_semi_infos().empty() && parent->get_condition_size() == 0
+          && !parent->has_group_by() && !parent->has_distinct()
+          && !parent->has_window_function() && parent->get_having_exprs().empty()
+          && !parent->has_order_by() && parent->get_subquery_expr_size() == 0
+          && parent->get_aggr_item_size() == 1 && parent->get_select_item_size() == 1
+          && parent->get_limit_expr() == nullptr && parent->get_offset_expr() == nullptr) {
+        const TableItem *table = parent->get_table_item(0);
+        const ObAggFunRawExpr *aggregate = parent->get_aggr_item(0);
+        count_only = nullptr != table && table->is_generated_table() && !table->is_fake_cte_table()
+                     && table->ref_query_ == child && nullptr != aggregate
+                     && aggregate->get_expr_type() == T_FUN_COUNT
+                     && !aggregate->is_param_distinct() && aggregate->get_real_param_count() == 0
+                     && parent->get_select_item(0).expr_ == aggregate;
+        for (int64_t i = 0; count_only && i < child->get_select_item_size(); ++i) {
+          const ObRawExpr *expr = child->get_select_item(i).expr_;
+          count_only = nullptr != expr && (expr->is_column_ref_expr()
+                       || (expr->is_const_raw_expr() && expr->get_expr_type() != T_QUESTIONMARK));
+        }
+        for (int64_t i = 0; count_only && i < child->get_match_exprs().count(); ++i) {
+          const ObMatchFunRawExpr *match = child->get_match_exprs().at(i);
+          count_only = nullptr != match && !match->is_es_match()
+                       && match->get_mode_flag() == NATURAL_LANGUAGE_MODE;
+        }
+      }
+    }
+  }
+  // Only the cardinality of this generated table escapes. Its implicit score
+  // order cannot affect COUNT(*), including when the child has LIMIT/OFFSET.
+  // Explicit ordering and every value-consuming parent retain their old path.
+  return count_only;
 }
 
 // full-text index queries on a single base table are processed with order preservation. 

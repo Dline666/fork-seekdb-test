@@ -96,6 +96,13 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
   const common::ObLimitParam &limit = *iter_param_->limit_param_;
   const int64_t real_capacity = MIN(capacity, iter_param_->max_batch_size_);
   const int64_t dim_count = dim_iters_->count();
+  enum class IdCompareKind { GENERIC, UNSIGNED_INTEGER, BINARY_STRING };
+  const auto &id_meta = iter_param_->id_proj_expr_->datum_meta_;
+  const IdCompareKind compare_kind = id_meta.type_ == common::ObUInt64Type
+      ? IdCompareKind::UNSIGNED_INTEGER
+      : ((id_meta.type_ == common::ObVarcharType || id_meta.type_ == common::ObCharType)
+          && id_meta.cs_type_ == common::CS_TYPE_BINARY
+          ? IdCompareKind::BINARY_STRING : IdCompareKind::GENERIC);
   const ObDocIdExt *ids[ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT] = {};
   int64_t remaining[ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT] = {};
   int64_t consumed[ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT] = {};
@@ -130,11 +137,33 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
         matched_mask = (1U << i);
         matched_count = 1;
       } else {
-        ObSRMergeItem left, right;
-        left.iter_idx_ = i;
-        right.iter_idx_ = minimum;
         int64_t comparison = 0;
-        if (OB_FAIL(merge_cmp_.cmp(left, right, comparison))) {
+        if (compare_kind == IdCompareKind::GENERIC) {
+          ObSRMergeItem left, right;
+          left.iter_idx_ = i;
+          right.iter_idx_ = minimum;
+          ret = merge_cmp_.cmp(left, right, comparison);
+        } else {
+          const ObDatum &left = *iter_domain_ids_[i];
+          const ObDatum &right = *iter_domain_ids_[minimum];
+          if (left.is_null() || right.is_null()) {
+            comparison = left.is_null() ? (right.is_null() ? 0 : -1) : 1;
+          } else if (compare_kind == IdCompareKind::UNSIGNED_INTEGER) {
+            const uint64_t l = left.get_uint64();
+            const uint64_t r = right.get_uint64();
+            comparison = l < r ? -1 : (l > r ? 1 : 0);
+          } else {
+            // CS_TYPE_BINARY compares all bytes, including trailing spaces.
+            // Preserve byte order for generated document IDs; their payload
+            // must not be interpreted as a pair of native integer values.
+            const int64_t prefix_length = MIN(left.len_, right.len_);
+            comparison = prefix_length > 0 ? MEMCMP(left.ptr_, right.ptr_, prefix_length) : 0;
+            if (comparison == 0) {
+              comparison = left.len_ < right.len_ ? -1 : (left.len_ > right.len_ ? 1 : 0);
+            }
+          }
+        }
+        if (OB_FAIL(ret)) {
         } else if (comparison < 0) {
           minimum = i;
           matched_mask = (1U << i);
