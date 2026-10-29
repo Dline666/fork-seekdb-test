@@ -120,6 +120,8 @@ def main():
         # Controls consume values, have explicit ordering, or have a parent
         # operator that can distinguish which rows survive the child LIMIT.
         controls = {
+            'cte count': "with matched as (select id from docs where match(content) against('alpha bravo') limit 20) select count(*) from matched",
+            'cte shared values': "with matched as (select id from docs where match(content) against('alpha bravo') limit 20) select (select count(*) from matched),(select sum(id) from matched)",
             'explicit score order': "select count(*) from (select id from docs where match(content) against('alpha bravo') order by match(content) against('alpha bravo') desc limit 20)t",
             'direct ids': "select id from docs where match(content) against('alpha bravo') limit 20",
             'direct scores': "select id,match(content) against('alpha bravo') score from docs where match(content) against('alpha bravo') order by score desc,id limit 20",

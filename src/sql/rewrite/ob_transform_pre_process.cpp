@@ -3812,7 +3812,8 @@ bool ObTransformPreProcess::fulltext_rows_consumed_only_by_count(
           && parent->get_limit_expr() == nullptr && parent->get_offset_expr() == nullptr) {
         const TableItem *table = parent->get_table_item(0);
         const ObAggFunRawExpr *aggregate = parent->get_aggr_item(0);
-        count_only = nullptr != table && table->is_generated_table() && !table->is_fake_cte_table()
+        count_only = nullptr != table && table->is_generated_table()
+                     && table->cte_type_ == TableItem::CTEType::NOT_CTE
                      && table->ref_query_ == child && nullptr != aggregate
                      && aggregate->get_expr_type() == T_FUN_COUNT
                      && !aggregate->is_param_distinct() && aggregate->get_real_param_count() == 0
