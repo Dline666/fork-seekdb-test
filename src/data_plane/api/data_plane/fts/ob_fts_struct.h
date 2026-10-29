@@ -54,7 +54,13 @@ private:
 // Per-document accumulator: callers create it on the executing stack and
 // finish segmentation before consuming it. Shared dictionaries and stopword
 // caches retain their own synchronization.
-typedef common::hash::ObHashMap<ObFTWord, int64_t, common::hash::NoPthreadDefendMode> ObFTWordMap;
+// The private node pool also needs no lock; retain default node/block sizing.
+using FTWordMapNode = common::hash::HashMapTypes<ObFTWord, int64_t>::AllocType;
+using FTWordMapNodeAllocator = common::hash::SimpleAllocer<FTWordMapNode,
+    common::hash::NodeNumTraits<FTWordMapNode>::NODE_NUM, common::hash::NoPthreadDefendMode>;
+using ObFTWordMap = common::hash::ObHashMap<ObFTWord, int64_t,
+    common::hash::NoPthreadDefendMode, common::hash::hash_func<ObFTWord>,
+    common::hash::equal_to<ObFTWord>, FTWordMapNodeAllocator>;
 
 class ObAddWordFlag final
 {

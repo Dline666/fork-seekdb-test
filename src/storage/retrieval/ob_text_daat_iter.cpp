@@ -31,7 +31,6 @@ bool count_owned_binary_window(const ObDocIdExt *const *ids, const int64_t *rema
                                const int64_t streams, int64_t *take, int64_t &cardinality)
 {
   const ObDatum *end = nullptr;
-  const ObDatum *anchor = nullptr;
   auto compare = [](const ObDatum &left, const ObDatum &right) {
     if (left.is_null() || right.is_null()) {
       return left.is_null() ? (right.is_null() ? 0 : -1) : 1;
@@ -66,23 +65,29 @@ bool count_owned_binary_window(const ObDocIdExt *const *ids, const int64_t *rema
     records += left;
   }
   if (records < 128) { return false; }
-  uint32_t minimum = 65535;
-  uint32_t maximum = 0;
+  if (end->is_null() || end->len_ != 16 || end->ptr_ == nullptr) { return false; }
+  const char *const anchor = end->ptr_;
   for (int64_t i = 0; i < streams; ++i) {
     for (int64_t j = 0; j < take[i]; ++j) {
       const ObDatum &id = ids[i][j].get_datum();
       if (id.is_null() || id.len_ != 16 || id.ptr_ == nullptr) { return false; }
-      if (anchor == nullptr) { anchor = &id; }
       // Native generated IDs place the sequence's low bytes at offsets 8/9
       // on little-endian hosts. This is merely a compression opportunity:
       // validate all other bytes, making the two-byte key an exact identity
       // for arbitrary binary strings too, without assuming numeric ID order.
-      if (MEMCMP(id.ptr_, anchor->ptr_, 8) != 0
-          || MEMCMP(id.ptr_ + 10, anchor->ptr_ + 10, 6) != 0) { return false; }
-      const unsigned char *bytes = reinterpret_cast<const unsigned char *>(id.ptr_);
-      const uint32_t key = (static_cast<uint32_t>(bytes[8]) << 8) | bytes[9];
-      minimum = MIN(minimum, key);
-      maximum = MAX(maximum, key);
+      if (MEMCMP(id.ptr_, anchor, 8) != 0
+          || MEMCMP(id.ptr_ + 10, anchor + 10, 6) != 0) { return false; }
+    }
+  }
+  // Only after validating the complete identity compression can ordered span
+  // endpoints determine the bitmap range. end itself belongs to the window.
+  uint32_t minimum = 65535;
+  const unsigned char *end_bytes = reinterpret_cast<const unsigned char *>(anchor);
+  const uint32_t maximum = (static_cast<uint32_t>(end_bytes[8]) << 8) | end_bytes[9];
+  for (int64_t i = 0; i < streams; ++i) {
+    if (take[i] > 0) {
+      const unsigned char *first = reinterpret_cast<const unsigned char *>(ids[i][0].get_datum().ptr_);
+      minimum = MIN(minimum, (static_cast<uint32_t>(first[8]) << 8) | first[9]);
     }
   }
   uint64_t bitmap[1024];
