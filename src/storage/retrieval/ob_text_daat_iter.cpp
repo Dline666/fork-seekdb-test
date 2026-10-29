@@ -22,6 +22,88 @@ namespace oceanbase
 {
 namespace storage
 {
+namespace
+{
+// Each (token, document ID) posting is unique and streams are ordered by binary
+// ID. Taking all prefixes <= the minimum loaded tail closes a window: unseen
+// rows in every stream are strictly above its end, including across batches.
+bool count_owned_binary_window(const ObDocIdExt *const *ids, const int64_t *remaining,
+                               const int64_t streams, int64_t *take, int64_t &cardinality)
+{
+  const ObDatum *end = nullptr;
+  const ObDatum *anchor = nullptr;
+  auto compare = [](const ObDatum &left, const ObDatum &right) {
+    if (left.is_null() || right.is_null()) {
+      return left.is_null() ? (right.is_null() ? 0 : -1) : 1;
+    }
+    const int64_t length = MIN(left.len_, right.len_);
+    const int prefix = length > 0 ? MEMCMP(left.ptr_, right.ptr_, length) : 0;
+    return prefix != 0 ? prefix : (left.len_ < right.len_ ? -1 : (left.len_ > right.len_ ? 1 : 0));
+  };
+  for (int64_t i = 0; i < streams; ++i) {
+    take[i] = 0;
+    if (remaining[i] > 0) {
+      const ObDatum &tail = ids[i][remaining[i] - 1].get_datum();
+      if (end == nullptr || compare(tail, *end) < 0) {
+        end = &tail;
+      }
+    }
+  }
+  if (end == nullptr) { return false; }
+  int64_t records = 0;
+  for (int64_t i = 0; i < streams; ++i) {
+    int64_t left = 0;
+    int64_t right = remaining[i];
+    while (left < right) {
+      const int64_t middle = left + (right - left) / 2;
+      if (compare(ids[i][middle].get_datum(), *end) <= 0) {
+        left = middle + 1;
+      } else {
+        right = middle;
+      }
+    }
+    take[i] = left;
+    records += left;
+  }
+  if (records < 128) { return false; }
+  uint32_t minimum = 65535;
+  uint32_t maximum = 0;
+  for (int64_t i = 0; i < streams; ++i) {
+    for (int64_t j = 0; j < take[i]; ++j) {
+      const ObDatum &id = ids[i][j].get_datum();
+      if (id.is_null() || id.len_ != 16 || id.ptr_ == nullptr) { return false; }
+      if (anchor == nullptr) { anchor = &id; }
+      // Native generated IDs place the sequence's low bytes at offsets 8/9
+      // on little-endian hosts. This is merely a compression opportunity:
+      // validate all other bytes, making the two-byte key an exact identity
+      // for arbitrary binary strings too, without assuming numeric ID order.
+      if (MEMCMP(id.ptr_, anchor->ptr_, 8) != 0
+          || MEMCMP(id.ptr_ + 10, anchor->ptr_ + 10, 6) != 0) { return false; }
+      const unsigned char *bytes = reinterpret_cast<const unsigned char *>(id.ptr_);
+      const uint32_t key = (static_cast<uint32_t>(bytes[8]) << 8) | bytes[9];
+      minimum = MIN(minimum, key);
+      maximum = MAX(maximum, key);
+    }
+  }
+  uint64_t bitmap[1024];
+  const uint32_t first_word = minimum >> 6;
+  const uint32_t last_word = maximum >> 6;
+  MEMSET(bitmap + first_word, 0, (last_word - first_word + 1) * sizeof(uint64_t));
+  for (int64_t i = 0; i < streams; ++i) {
+    for (int64_t j = 0; j < take[i]; ++j) {
+      const unsigned char *bytes = reinterpret_cast<const unsigned char *>(ids[i][j].get_datum().ptr_);
+      const uint32_t key = (static_cast<uint32_t>(bytes[8]) << 8) | bytes[9];
+      bitmap[key >> 6] |= uint64_t(1) << (key & 63);
+    }
+  }
+  cardinality = 0;
+  for (uint32_t i = first_word; i <= last_word; ++i) {
+    cardinality += __builtin_popcountll(bitmap[i]);
+  }
+  return true;
+}
+} // namespace
+
 int ObTextDaaTIter::init(const ObTextDaaTParam &param)
 {
   int ret = OB_SUCCESS;
@@ -37,6 +119,7 @@ int ObTextDaaTIter::init(const ObTextDaaTParam &param)
     function_lookup_mode_ = param.function_lookup_mode_;
     minimum_should_match_ = param.minimum_should_match_;
     exhausted_mask_ = 0;
+    pending_count_ = 0;
   }
   return ret;
 }
@@ -44,6 +127,7 @@ int ObTextDaaTIter::init(const ObTextDaaTParam &param)
 void ObTextDaaTIter::reset()
 {
   exhausted_mask_ = 0;
+  pending_count_ = 0;
   bm25_param_estimator_.reset();
   // this class can know the type of dim_iters_, but ObSRDaaTIterImpl maybe not
   if (OB_NOT_NULL(dim_iters_)) {
@@ -57,6 +141,7 @@ void ObTextDaaTIter::reset()
 void ObTextDaaTIter::reuse(const bool switch_tablet)
 {
   exhausted_mask_ = 0;
+  pending_count_ = 0;
   if ((OB_NOT_NULL(dim_iters_) && 0 == dim_iters_->count())) {
     // do nothing
   } else {
@@ -113,10 +198,12 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
     iters[i] = static_cast<ObTextRetrievalDaaTTokenIter *>(dim_iters_->at(i));
   }
   uint8_t refill_mask = ((1U << dim_count) - 1) & ~exhausted_mask_;
+  bool try_window = true;
   auto refill = [&](const int64_t i) {
     if (OB_SUCC(ret) && (refill_mask & (1U << i))) {
       iters[i]->consume_owned_ids(consumed[i]);
       consumed[i] = 0;
+      try_window = true;
       if (OB_FAIL(iters[i]->get_owned_id_span(ids[i], remaining[i]))) {
         if (ret == OB_ITER_END) {
           exhausted_mask_ |= (1U << i);
@@ -147,6 +234,21 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
     ret = OB_ITER_END;
   }
   while (OB_SUCC(ret) && count < real_capacity) {
+    if (pending_count_ > 0) {
+      if (limit.is_valid() && input_row_cnt_ < limit.offset_) {
+        const int64_t skipped = MIN(pending_count_, limit.offset_ - input_row_cnt_);
+        pending_count_ -= skipped;
+        input_row_cnt_ += skipped;
+      }
+      int64_t delivered = MIN(pending_count_, real_capacity - count);
+      if (limit.is_valid()) { delivered = MIN(delivered, limit.limit_ - output_row_cnt_); }
+      pending_count_ -= delivered;
+      input_row_cnt_ += delivered;
+      output_row_cnt_ += delivered;
+      count += delivered;
+      if (limit.is_valid() && output_row_cnt_ >= limit.limit_) { ret = OB_ITER_END; }
+      if (OB_FAIL(ret) || count >= real_capacity) { break; }
+    }
     // Refill only at the start of a requested round, never after satisfying
     // capacity/limit. Each token retains its owned snapshot across calls.
     if (refill_mask != 0) {
@@ -154,6 +256,28 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
       if (dim_count > 1) { refill(1); }
       if (dim_count > 2) { refill(2); }
       refill_mask = 0;
+    }
+    if (OB_SUCC(ret) && try_window && real_capacity >= 64
+        && compare_kind == IdCompareKind::BINARY_STRING && minimum_should_match_ <= 1) {
+      int64_t take[MAX_STREAMS] = {};
+      int64_t cardinality = 0;
+      try_window = false;
+      if (count_owned_binary_window(ids, remaining, dim_count, take, cardinality)) {
+        // Validation has no side effects. Commit only a fully closed, exact
+        // window; pending rows survive the caller's capacity boundary.
+        for (int64_t i = 0; i < dim_count; ++i) {
+          if (take[i] > 0) {
+            ids[i] += take[i];
+            remaining[i] -= take[i];
+            consumed[i] += take[i];
+            heads[i] = remaining[i] > 0 ? &ids[i]->get_datum() : nullptr;
+            if (remaining[i] == 0) { refill_mask |= (1U << i); }
+          }
+        }
+        pending_count_ = cardinality;
+        try_window = true;
+        continue;
+      }
     }
     int64_t minimum = -1;
     uint8_t matched_mask = 0;

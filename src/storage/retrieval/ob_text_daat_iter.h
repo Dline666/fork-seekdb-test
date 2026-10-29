@@ -56,7 +56,7 @@ public:
   ObTextDaaTIter() : ObSRDaaTIterImpl(),
       bm25_param_estimator_(),
       mode_flag_(sql::ObMatchAgainstMode::NATURAL_LANGUAGE_MODE),
-      function_lookup_mode_(false), minimum_should_match_(1), exhausted_mask_(0) {}
+      function_lookup_mode_(false), minimum_should_match_(1), exhausted_mask_(0), pending_count_(0) {}
   virtual ~ObTextDaaTIter() { reset(); }
 
   int init(const ObTextDaaTParam &param);
@@ -72,6 +72,7 @@ protected:
   bool function_lookup_mode_;
   int64_t minimum_should_match_;
   uint8_t exhausted_mask_;
+  int64_t pending_count_; // Consumed window cardinality not yet delivered.
 private:
   DISALLOW_COPY_AND_ASSIGN(ObTextDaaTIter);
 };
