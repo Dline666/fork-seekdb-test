@@ -3805,7 +3805,8 @@ bool ObTransformPreProcess::fulltext_rows_consumed_only_by_count(
           && !parent->has_for_update() && !parent->is_contains_assignment()
           && parent->get_from_item_size() == 1 && parent->get_joined_tables().empty()
           && parent->get_semi_infos().empty() && parent->get_condition_size() == 0
-          && !parent->has_group_by() && !parent->has_distinct()
+          && parent->get_group_expr_size() == 0 && parent->get_rollup_expr_size() == 0
+          && !parent->has_distinct()
           && !parent->has_window_function() && parent->get_having_exprs().empty()
           && !parent->has_order_by() && parent->get_subquery_expr_size() == 0
           && parent->get_aggr_item_size() == 1 && parent->get_select_item_size() == 1
