@@ -118,7 +118,10 @@ set(_rust_build_env "CARGO_TARGET_DIR=${RUST_TARGET_DIR}"
                     "DEFAULT_LOG_LEVEL=${DEFAULT_LOG_LEVEL}"
                     "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}"
                     "AR=${CMAKE_AR}")
-if(NOT WIN32)
+if(WIN32)
+  # Match the compatibility define used by the main C++ build with MSVC STL.
+  list(APPEND _rust_build_env "CXXFLAGS=$ENV{CXXFLAGS} /D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+else()
   # Match the libstdc++ ABI selected in Env.cmake for CXX's std::string boundary.
   list(APPEND _rust_build_env "CXXFLAGS=$ENV{CXXFLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
 endif()

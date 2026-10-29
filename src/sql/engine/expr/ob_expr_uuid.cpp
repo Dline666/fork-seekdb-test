@@ -92,10 +92,21 @@ int ObUUIDNode::init()
   ULONG buf_len = 15000;
   PIP_ADAPTER_ADDRESSES addresses = NULL;
   bool mac_addr_found = false;
-  addresses = (IP_ADAPTER_ADDRESSES *)malloc(buf_len);
-  if (OB_ISNULL(addresses)) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (GetAdaptersAddresses(AF_UNSPEC, 0, NULL, addresses, &buf_len) == NO_ERROR) {
+  ULONG api_ret = ERROR_BUFFER_OVERFLOW;
+  // GetAdaptersAddresses may require a larger buffer as virtual adapters are added.
+  for (int64_t retry = 0; retry < 3 && api_ret == ERROR_BUFFER_OVERFLOW; ++retry) {
+    if (OB_NOT_NULL(addresses)) {
+      free(addresses);
+      addresses = NULL;
+    }
+    addresses = (IP_ADAPTER_ADDRESSES *)malloc(buf_len);
+    if (OB_ISNULL(addresses)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      break;
+    }
+    api_ret = GetAdaptersAddresses(AF_UNSPEC, 0, NULL, addresses, &buf_len);
+  }
+  if (OB_SUCC(ret) && api_ret == NO_ERROR) {
     for (PIP_ADAPTER_ADDRESSES addr = addresses; addr && !mac_addr_found; addr = addr->Next) {
       if (addr->PhysicalAddressLength == 6 && addr->IfType != IF_TYPE_SOFTWARE_LOOPBACK) {
         MEMCPY(mac_addr_, addr->PhysicalAddress, 6);
@@ -107,10 +118,11 @@ int ObUUIDNode::init()
     } else {
       is_inited_ = true;
     }
-  } else {
+  } else if (OB_SUCC(ret)) {
     ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("failed to enumerate network adapters", K(ret), K(api_ret), K(buf_len));
   }
-  if (addresses) { free(addresses); }
+  if (OB_NOT_NULL(addresses)) { free(addresses); }
 #elif defined(__APPLE__)
   // macOS: Use getifaddrs to get network interface information
   struct ifaddrs *ifaddrs_list = nullptr;

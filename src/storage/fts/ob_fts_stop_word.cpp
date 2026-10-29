@@ -74,23 +74,12 @@ void ObStopWordChecker::destroy()
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
-  
-  
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
-    if (OB_FAIL(common::ObCharset::charset_convert(
-                                       allocator,
-                                       word.get_word().get_string(),
-                                       word.get_collation_type(),
-                                       stopword_type_.get_collation_type(),
-                                       cmp_str))) {
-    } else {
+    auto lookup = [this, &is_stopword, &ret](const common::ObString &cmp_str) {
       ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
       ret = stopword_set_.exist_refactored(converted);
       if (OB_HASH_NOT_EXIST == ret) {
@@ -101,7 +90,25 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
         ret = OB_SUCCESS;
       } else if (OB_SUCC(ret)) {
         ret = OB_ERR_UNEXPECTED;
+      }
+    };
+    if (word.get_collation_type() == stopword_type_.get_collation_type()) {
+      // The stopword table uses the same collation as the common UTF8 input.
+      // Avoid constructing a temporary arena and entering the charset converter
+      // when no conversion is required.
+      lookup(word.get_word().get_string());
+    } else {
+      common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+      common::ObString cmp_str;
+      if (OB_FAIL(common::ObCharset::charset_convert(
+                                         allocator,
+                                         word.get_word().get_string(),
+                                         word.get_collation_type(),
+                                         stopword_type_.get_collation_type(),
+                                         cmp_str))) {
       } else {
+        // Keep the converted string alive through the hash lookup.
+        lookup(cmp_str);
       }
     }
   }
