@@ -125,6 +125,20 @@ int ObGenDicLoader::get_dic_loader(const ObString &parser_name,
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(dic_loader_key.init(parser_name, charset))) {
   } else {
+    // Existing loaders remain owned by the registry. Pin the caller's handle
+    // under the read lock; acquiring the write lock for every TOKENIZE call
+    // unnecessarily excludes other readers and waits for global read refs.
+    {
+      TCRLockGuard guard(lock_);
+      ret = dic_loader_map_.get_refactored(dic_loader_key, dic_loader);
+      if (OB_SUCC(ret)) {
+        return loader_handle.set_loader(dic_loader);
+      } else if (ret != OB_HASH_NOT_EXIST) {
+        return OB_ERR_UNEXPECTED;
+      }
+    }
+    // A reader may have observed a miss while another thread created the
+    // loader. Recheck under the write lock before allocating and publishing.
     TCWLockGuard guard(lock_);
     if (OB_FAIL(dic_loader_map_.get_refactored(dic_loader_key, dic_loader))) {
       if (OB_HASH_NOT_EXIST == ret) {
