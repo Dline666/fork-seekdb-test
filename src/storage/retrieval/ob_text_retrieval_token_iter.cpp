@@ -496,6 +496,25 @@ int ObTextRetrievalDaaTTokenIter::get_next_row() {
   return ret;
 }
 
+int ObTextRetrievalDaaTTokenIter::get_owned_id_span(const ObDocIdExt *&ids, int64_t &count)
+{
+  int ret = OB_SUCCESS;
+  ids = nullptr;
+  count = 0;
+  if (cur_idx_ < 0 || cur_idx_ >= count_) {
+    ret = get_next_row();
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_UNLIKELY(cur_idx_ < 0 || cur_idx_ >= count_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      ids = &doc_id_[cur_idx_];
+      count = count_ - cur_idx_;
+    }
+  }
+  return ret;
+}
+
 int ObTextRetrievalDaaTTokenIter::save_relevances_and_docids()
 {
   int ret = OB_SUCCESS;

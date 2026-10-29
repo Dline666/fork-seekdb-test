@@ -35,12 +35,15 @@ int ObTextDaaTIter::init(const ObTextDaaTParam &param)
   } else {
     mode_flag_ = param.mode_flag_;
     function_lookup_mode_ = param.function_lookup_mode_;
+    minimum_should_match_ = param.minimum_should_match_;
+    exhausted_mask_ = 0;
   }
   return ret;
 }
 
 void ObTextDaaTIter::reset()
 {
+  exhausted_mask_ = 0;
   bm25_param_estimator_.reset();
   // this class can know the type of dim_iters_, but ObSRDaaTIterImpl maybe not
   if (OB_NOT_NULL(dim_iters_)) {
@@ -53,6 +56,7 @@ void ObTextDaaTIter::reset()
 
 void ObTextDaaTIter::reuse(const bool switch_tablet)
 {
+  exhausted_mask_ = 0;
   if ((OB_NOT_NULL(dim_iters_) && 0 == dim_iters_->count())) {
     // do nothing
   } else {
@@ -74,6 +78,100 @@ int ObTextDaaTIter::pre_process()
   } else if (iter_param_->need_project_relevance()) {
     if (OB_FAIL(bm25_param_estimator_.do_estimation(*iter_param_->eval_ctx_))) {
     }
+  }
+  return ret;
+}
+
+int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
+{
+  if (!is_inited_ || capacity <= 0 || mode_flag_ != sql::NATURAL_LANGUAGE_MODE
+      || function_lookup_mode_ || iter_param_->emit_domain_id_
+      || iter_param_->relevance_expr_ != nullptr || iter_param_->need_project_relevance()
+      || iter_param_->need_filter() || dim_iters_->count() == 0
+      || dim_iters_->count() > ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT) {
+    return ObSRDaaTIterImpl::get_next_rows(capacity, count);
+  }
+  int ret = OB_SUCCESS;
+  count = 0;
+  const common::ObLimitParam &limit = *iter_param_->limit_param_;
+  const int64_t real_capacity = MIN(capacity, iter_param_->max_batch_size_);
+  const int64_t dim_count = dim_iters_->count();
+  const ObDocIdExt *ids[ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT] = {};
+  int64_t remaining[ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT] = {};
+  int64_t consumed[ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT] = {};
+  if (limit.is_valid() && output_row_cnt_ >= limit.limit_) {
+    ret = OB_ITER_END;
+  }
+  while (OB_SUCC(ret) && count < real_capacity) {
+    // Refill only exhausted spans. Every span owns its payload, because the
+    // underlying scans share expression buffers across tokens.
+    for (int64_t i = 0; OB_SUCC(ret) && i < dim_count; ++i) {
+      if (remaining[i] == 0 && !(exhausted_mask_ & (1U << i))) {
+        ObTextRetrievalDaaTTokenIter *iter =
+            static_cast<ObTextRetrievalDaaTTokenIter *>(dim_iters_->at(i));
+        iter->consume_owned_ids(consumed[i]);
+        consumed[i] = 0;
+        if (OB_FAIL(iter->get_owned_id_span(ids[i], remaining[i]))) {
+          if (ret == OB_ITER_END) {
+            exhausted_mask_ |= (1U << i);
+            ret = OB_SUCCESS;
+          }
+        }
+      }
+      iter_domain_ids_[i] = remaining[i] > 0 ? &ids[i]->get_datum() : nullptr;
+    }
+    int64_t minimum = -1;
+    uint8_t matched_mask = 0;
+    int64_t matched_count = 0;
+    for (int64_t i = 0; OB_SUCC(ret) && i < dim_count; ++i) {
+      if (remaining[i] == 0) {
+      } else if (minimum < 0) {
+        minimum = i;
+        matched_mask = (1U << i);
+        matched_count = 1;
+      } else {
+        ObSRMergeItem left, right;
+        left.iter_idx_ = i;
+        right.iter_idx_ = minimum;
+        int64_t comparison = 0;
+        if (OB_FAIL(merge_cmp_.cmp(left, right, comparison))) {
+        } else if (comparison < 0) {
+          minimum = i;
+          matched_mask = (1U << i);
+          matched_count = 1;
+        } else if (comparison == 0) {
+          matched_mask |= (1U << i);
+          ++matched_count;
+        }
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (minimum < 0) {
+      ret = OB_ITER_END;
+    } else {
+      for (int64_t i = 0; i < dim_count; ++i) {
+        if (matched_mask & (1U << i)) {
+          ++ids[i];
+          --remaining[i];
+          ++consumed[i];
+        }
+      }
+      // Equivalent to the natural-language inner-product collector: one
+      // contribution per matching stream, then matched_cnt >= should_match.
+      if (matched_count >= minimum_should_match_) {
+        ++input_row_cnt_;
+        if (!limit.is_valid() || input_row_cnt_ > limit.offset_) {
+          ++count;
+          ++output_row_cnt_;
+          if (limit.is_valid() && output_row_cnt_ >= limit.limit_) {
+            ret = OB_ITER_END;
+          }
+        }
+      }
+    }
+  }
+  for (int64_t i = 0; i < dim_count; ++i) {
+    static_cast<ObTextRetrievalDaaTTokenIter *>(dim_iters_->at(i))->consume_owned_ids(consumed[i]);
   }
   return ret;
 }
