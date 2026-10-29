@@ -227,7 +227,11 @@ int oceanbase::storage::ObDDLStorageUtil::report_ddl_sstable_checksum(
         break;
       }
     }
-    ob_usleep(100L * 1000L);
+    // The report is a synchronous inner-table write; only back off after
+    // every retry failed, so successful builds do not stall for 100ms.
+    if (OB_FAIL(ret)) {
+      ob_usleep(100L * 1000L);
+    }
   }
   return ret;
 }
