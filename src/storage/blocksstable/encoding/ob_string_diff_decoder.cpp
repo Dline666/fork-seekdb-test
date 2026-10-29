@@ -165,10 +165,17 @@ int ObStringDiffDecoder::batch_decode(
     if (OB_FAIL(ret)) {
     } else if (OB_ISNULL(buf = static_cast<char *>(ctx.allocator_->alloc(buf_size * row_cap)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
-    } else {
-      for (int64_t i = 0; i < row_cap; ++i) {
-        header_->copy_string(ObStringDiffHeader::LeftToRight(), std::logical_not<uint8_t>(),
-            header_->common_data(), buf + i * buf_size);
+    } else if (row_cap > 0) {
+      // The common bytes are identical for every row in this column batch.
+      // Interpret the difference descriptors once, then copy that template;
+      // the existing fixed/variable and hex paths fill each row's differences.
+      // Initialize unused difference positions so copying the template never
+      // propagates uninitialized bytes, including through NULL row buffers.
+      MEMSET(buf, 0, string_size);
+      header_->copy_string(ObStringDiffHeader::LeftToRight(), std::logical_not<uint8_t>(),
+          header_->common_data(), buf);
+      for (int64_t i = 1; i < row_cap; ++i) {
+        MEMCPY(buf + i * buf_size, buf, string_size);
       }
     }
 
