@@ -16,6 +16,10 @@
 
 #define USING_LOG_PREFIX SERVER
 
+#if defined(__linux__) && defined(OB_BUILD_CUVS)
+#include "observer/seekdb_cuvs_startup_omp.h"
+#endif
+
 #ifdef WITH_COVERAGE
 #include <stdio.h>
 #include <stdlib.h>
@@ -857,6 +861,9 @@ static const char *get_arg_value(int argc, char *argv[], const char *name)
 
 int main(int argc, char *argv[])
 {
+#if defined(__linux__) && defined(OB_BUILD_CUVS)
+  seekdb_cuvs_maybe_restart_for_cpu_quota(argc, argv);
+#endif
 #if defined(__linux__)
   disable_hugepage_for_self_text();
 #endif

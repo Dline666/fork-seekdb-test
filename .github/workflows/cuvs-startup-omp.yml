@@ -1,0 +1,49 @@
+name: CUVS startup OpenMP host validation
+
+on:
+  push:
+    branches: [competition/amd-cagra-startup-omp]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cuvs-startup-omp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Record compiler and visible CPU limits
+        run: |
+          mkdir -p validation-artifacts
+          {
+            git rev-parse HEAD
+            gcc --version | head -1
+            g++ --version | head -1
+            getconf _NPROCESSORS_ONLN
+            cat /proc/self/status | grep Cpus_allowed_list
+            cat /sys/fs/cgroup/cpu.max || true
+          } > validation-artifacts/environment.txt
+      - name: Validate production startup policy and actual Linux exec
+        shell: bash
+        run: |
+          set -o pipefail
+          bash unittest/oblib/vector/startup_omp/run_host_tests.sh 2>&1 | tee validation-artifacts/startup-omp.log
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuvs-startup-linux-${{ github.sha }}
+          path: validation-artifacts/
+          if-no-files-found: error
+          retention-days: 14
