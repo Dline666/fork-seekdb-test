@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 /* seekdb <-> hipVS bridge: CAGRA with per-index reusable search workspace. */
 #include "seekdb_cuvs_bridge.h"
 #include <cuvs/core/c_api.h>
