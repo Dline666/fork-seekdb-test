@@ -39,8 +39,24 @@ public:
   void reset();
 
   int hash(uint64_t &hash_val) const;
-  const common::ObDatum &get_datum() const;
-  int from_datum(const common::ObDatum &datum);
+  const common::ObDatum &get_datum() const { return datum_; }
+  int from_datum(const common::ObDatum &datum)
+  {
+    // Preserve the complete datum descriptor, including flags. The usual
+    // integer and generated document IDs can use constant-sized copies.
+    if (!datum.is_null() && (datum.len_ == 8 || datum.len_ == 16)) {
+      datum_ = datum;
+      if (datum.len_ == 8) {
+        MEMCPY(buf_, datum.ptr_, 8);
+      } else {
+        MEMCPY(buf_, datum.ptr_, 16);
+      }
+      datum_.ptr_ = buf_;
+      return common::OB_SUCCESS;
+    }
+    int64_t pos = 0;
+    return datum_.deep_copy(datum, buf_, OB_DOC_ID_EXT_SIZE, pos);
+  }
   int from_obj(const common::ObObj &obj);
 
   ObDocIdExt &operator=(const ObDocIdExt &other);

@@ -185,7 +185,13 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
             // Preserve byte order for generated document IDs; their payload
             // must not be interpreted as a pair of native integer values.
             const int64_t prefix_length = MIN(left.len_, right.len_);
-            comparison = prefix_length > 0 ? MEMCMP(left.ptr_, right.ptr_, prefix_length) : 0;
+            // Keep byte ordering while exposing the usual document-ID width
+            // to the compiler. Other lengths retain the general comparison.
+            if (left.len_ == 16 && right.len_ == 16) {
+              comparison = MEMCMP(left.ptr_, right.ptr_, 16);
+            } else {
+              comparison = prefix_length > 0 ? MEMCMP(left.ptr_, right.ptr_, prefix_length) : 0;
+            }
             if (comparison == 0) {
               comparison = left.len_ < right.len_ ? -1 : (left.len_ > right.len_ ? 1 : 0);
             }
