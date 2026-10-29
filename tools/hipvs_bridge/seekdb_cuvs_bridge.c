@@ -76,10 +76,13 @@ void *seekdb_cuvs_build(const float *base, long n, long dim)
   if (!h) return NULL;
   int64_t shape[2] = {n, dim};
   DLManagedTensor dataset = tensor((void *)base, shape, kDLCPU, kDLFloat);
-  // Keep the V5 graph construction and precision parameters unchanged.
+  // FP32 NN_DESCENT CAGRA with the V5 final graph degree (128). The
+  // intermediate kNN graph is 128 wide instead of 256: detour pruning costs
+  // O(n * intermediate^3) and the kNN sort/transfer O(n * intermediate), while
+  // the searched graph keeps 128 edges per node. Search settings unchanged.
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
+  h->ip->intermediate_graph_degree = 128;
   h->ip->nn_descent_niter = 100;
   if (cuvsCagraBuild(h->res, h->ip, &dataset, h->idx) != CUVS_SUCCESS ||
       cuvsStreamSync(h->res) != CUVS_SUCCESS) {
