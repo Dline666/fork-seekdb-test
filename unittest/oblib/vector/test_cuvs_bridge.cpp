@@ -87,7 +87,7 @@ cuvsError_t cuvsCagraBuild(cuvsResources_t, cuvsCagraIndexParams_t p, DLManagedT
 {
   ++build_calls;
   assert(p->build_algo == NN_DESCENT && p->graph_degree == 128);
-  assert(p->intermediate_graph_degree == 256 && p->nn_descent_niter == 100);
+  assert(p->intermediate_graph_degree == 256 && p->nn_descent_niter == 10);
   assert(d->manager_ctx == nullptr && d->deleter == nullptr);
   assert(d->dl_tensor.dtype.code == kDLFloat && d->dl_tensor.dtype.bits == 32);
   if (bad("build")) return CUVS_ERROR;
