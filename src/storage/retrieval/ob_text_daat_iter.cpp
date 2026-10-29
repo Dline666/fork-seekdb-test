@@ -103,35 +103,63 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
       : ((id_meta.type_ == common::ObVarcharType || id_meta.type_ == common::ObCharType)
           && id_meta.cs_type_ == common::CS_TYPE_BINARY
           ? IdCompareKind::BINARY_STRING : IdCompareKind::GENERIC);
-  const ObDocIdExt *ids[ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT] = {};
-  int64_t remaining[ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT] = {};
-  int64_t consumed[ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT] = {};
+  constexpr int64_t MAX_STREAMS = ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT;
+  ObTextRetrievalDaaTTokenIter *iters[MAX_STREAMS] = {};
+  const ObDocIdExt *ids[MAX_STREAMS] = {};
+  const ObDatum *heads[MAX_STREAMS] = {};
+  int64_t remaining[MAX_STREAMS] = {};
+  int64_t consumed[MAX_STREAMS] = {};
+  for (int64_t i = 0; i < dim_count; ++i) {
+    iters[i] = static_cast<ObTextRetrievalDaaTTokenIter *>(dim_iters_->at(i));
+  }
+  uint8_t refill_mask = ((1U << dim_count) - 1) & ~exhausted_mask_;
+  auto refill = [&](const int64_t i) {
+    if (OB_SUCC(ret) && (refill_mask & (1U << i))) {
+      iters[i]->consume_owned_ids(consumed[i]);
+      consumed[i] = 0;
+      if (OB_FAIL(iters[i]->get_owned_id_span(ids[i], remaining[i]))) {
+        if (ret == OB_ITER_END) {
+          exhausted_mask_ |= (1U << i);
+          ret = OB_SUCCESS;
+        }
+      }
+      heads[i] = remaining[i] > 0 ? &ids[i]->get_datum() : nullptr;
+      if (compare_kind == IdCompareKind::GENERIC) {
+        iter_domain_ids_[i] = heads[i];
+      }
+    }
+  };
+  auto consume = [&](const int64_t i) {
+    ++ids[i];
+    --remaining[i];
+    ++consumed[i];
+    if (remaining[i] > 0) {
+      heads[i] = &ids[i]->get_datum();
+    } else {
+      heads[i] = nullptr;
+      refill_mask |= (1U << i);
+    }
+    if (compare_kind == IdCompareKind::GENERIC) {
+      iter_domain_ids_[i] = heads[i];
+    }
+  };
   if (limit.is_valid() && output_row_cnt_ >= limit.limit_) {
     ret = OB_ITER_END;
   }
   while (OB_SUCC(ret) && count < real_capacity) {
-    // Refill only exhausted spans. Every span owns its payload, because the
-    // underlying scans share expression buffers across tokens.
-    for (int64_t i = 0; OB_SUCC(ret) && i < dim_count; ++i) {
-      if (remaining[i] == 0 && !(exhausted_mask_ & (1U << i))) {
-        ObTextRetrievalDaaTTokenIter *iter =
-            static_cast<ObTextRetrievalDaaTTokenIter *>(dim_iters_->at(i));
-        iter->consume_owned_ids(consumed[i]);
-        consumed[i] = 0;
-        if (OB_FAIL(iter->get_owned_id_span(ids[i], remaining[i]))) {
-          if (ret == OB_ITER_END) {
-            exhausted_mask_ |= (1U << i);
-            ret = OB_SUCCESS;
-          }
-        }
-      }
-      iter_domain_ids_[i] = remaining[i] > 0 ? &ids[i]->get_datum() : nullptr;
+    // Refill only at the start of a requested round, never after satisfying
+    // capacity/limit. Each token retains its owned snapshot across calls.
+    if (refill_mask != 0) {
+      refill(0);
+      if (dim_count > 1) { refill(1); }
+      if (dim_count > 2) { refill(2); }
+      refill_mask = 0;
     }
     int64_t minimum = -1;
     uint8_t matched_mask = 0;
     int64_t matched_count = 0;
-    for (int64_t i = 0; OB_SUCC(ret) && i < dim_count; ++i) {
-      if (remaining[i] == 0) {
+    auto select_head = [&](const int64_t i) {
+      if (OB_FAIL(ret) || heads[i] == nullptr) {
       } else if (minimum < 0) {
         minimum = i;
         matched_mask = (1U << i);
@@ -144,8 +172,8 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
           right.iter_idx_ = minimum;
           ret = merge_cmp_.cmp(left, right, comparison);
         } else {
-          const ObDatum &left = *iter_domain_ids_[i];
-          const ObDatum &right = *iter_domain_ids_[minimum];
+          const ObDatum &left = *heads[i];
+          const ObDatum &right = *heads[minimum];
           if (left.is_null() || right.is_null()) {
             comparison = left.is_null() ? (right.is_null() ? 0 : -1) : 1;
           } else if (compare_kind == IdCompareKind::UNSIGNED_INTEGER) {
@@ -173,18 +201,17 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
           ++matched_count;
         }
       }
-    }
+    };
+    select_head(0);
+    if (dim_count > 1) { select_head(1); }
+    if (dim_count > 2) { select_head(2); }
     if (OB_FAIL(ret)) {
     } else if (minimum < 0) {
       ret = OB_ITER_END;
     } else {
-      for (int64_t i = 0; i < dim_count; ++i) {
-        if (matched_mask & (1U << i)) {
-          ++ids[i];
-          --remaining[i];
-          ++consumed[i];
-        }
-      }
+      if (matched_mask & 1U) { consume(0); }
+      if (matched_mask & 2U) { consume(1); }
+      if (matched_mask & 4U) { consume(2); }
       // Equivalent to the natural-language inner-product collector: one
       // contribution per matching stream, then matched_cnt >= should_match.
       if (matched_count >= minimum_should_match_) {
@@ -200,7 +227,7 @@ int ObTextDaaTIter::get_next_rows(const int64_t capacity, int64_t &count)
     }
   }
   for (int64_t i = 0; i < dim_count; ++i) {
-    static_cast<ObTextRetrievalDaaTTokenIter *>(dim_iters_->at(i))->consume_owned_ids(consumed[i]);
+    iters[i]->consume_owned_ids(consumed[i]);
   }
   return ret;
 }
