@@ -3,11 +3,12 @@
 #include <cuvs/core/c_api.h>
 #include <dlpack/dlpack.h>
 enum { NN_DESCENT = 1, NO_FILTER = 0 };
+typedef enum { L2Expanded = 0 } cuvsDistanceType;
 typedef struct { int build_algo; size_t graph_degree, intermediate_graph_degree, nn_descent_niter; } cuvsCagraIndexParams;
 typedef cuvsCagraIndexParams *cuvsCagraIndexParams_t;
 typedef struct { size_t itopk_size, search_width; } cuvsCagraSearchParams;
 typedef cuvsCagraSearchParams *cuvsCagraSearchParams_t;
-typedef struct { int64_t n, dim; } cuvsCagraIndex;
+typedef struct { int64_t n, dim, degree; } cuvsCagraIndex;
 typedef cuvsCagraIndex *cuvsCagraIndex_t;
 typedef struct { int type; uintptr_t addr; } cuvsFilter;
 #ifdef __cplusplus
@@ -25,6 +26,9 @@ cuvsError_t cuvsCagraSerialize(cuvsResources_t, const char *, cuvsCagraIndex_t, 
 cuvsError_t cuvsCagraDeserialize(cuvsResources_t, const char *, cuvsCagraIndex_t);
 cuvsError_t cuvsCagraIndexGetSize(cuvsCagraIndex_t, int64_t *);
 cuvsError_t cuvsCagraIndexGetDims(cuvsCagraIndex_t, int64_t *);
+cuvsError_t cuvsCagraIndexGetGraphDegree(cuvsCagraIndex_t, int64_t *);
+cuvsError_t cuvsCagraIndexGetGraph(cuvsCagraIndex_t, DLManagedTensor *);
+cuvsError_t cuvsCagraIndexFromArgs(cuvsResources_t, cuvsDistanceType, DLManagedTensor *, DLManagedTensor *, cuvsCagraIndex_t);
 #ifdef __cplusplus
 }
 #endif

@@ -27,6 +27,19 @@ int   seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
 void  seekdb_cuvs_free(void* handle);
 int seekdb_cuvs_serialize(void* handle, const char* filename);
 void* seekdb_cuvs_deserialize(const char* filename, long n, long dim);
+/* Graph-only snapshot helpers. Serialize stores an exact uint32 CAGRA graph
+ * (no vectors) with a checked versioned header/checksum. Deserialization takes
+ * the separately persisted row-major FP32 base and copies both graph and base
+ * to index-owned GPU storage, synchronously, without rebuilding the graph.
+ * The caller may release base after return. Legacy full snapshots remain valid
+ * through seekdb_cuvs_serialize / seekdb_cuvs_deserialize above.
+ * Serialize requires the existing graph's contiguous uint32 device view;
+ * unsupported strides/layouts fail explicitly. A failed write may leave a
+ * partial file; the caller must publish only on success. */
+int seekdb_cuvs_serialize_graph(void* handle, const char* filename);
+void* seekdb_cuvs_deserialize_graph(const char* filename, const float* base,
+                                    long n, long dim);
+
 #ifdef __cplusplus
 }
 #endif

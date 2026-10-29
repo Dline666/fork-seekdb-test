@@ -57,6 +57,8 @@ extern "C" int   seekdb_cuvs_search(void *handle, const float *query, long nq, l
 extern "C" void  seekdb_cuvs_free(void *handle);
 extern "C" int seekdb_cuvs_serialize(void *handle, const char *filename);
 extern "C" void *seekdb_cuvs_deserialize(const char *filename, long n, long dim);
+extern "C" int seekdb_cuvs_serialize_graph(void *handle, const char *filename);
+extern "C" void *seekdb_cuvs_deserialize_graph(const char *filename, const float *base, long n, long dim);
 #else
 // GPU backend not compiled in (OB_BUILD_CUVS=OFF): inert stubs so oblib links
 // without libseekdb_cuvs_bridge.so. ob_cuvs_enabled() is false, so these are
@@ -67,6 +69,8 @@ static int   seekdb_cuvs_search(void *, const float *, long, long, unsigned int 
 static void  seekdb_cuvs_free(void *) {}
 static int seekdb_cuvs_serialize(void *, const char *) { return -1; }
 static void *seekdb_cuvs_deserialize(const char *, long, long) { return nullptr; }
+static int seekdb_cuvs_serialize_graph(void *, const char *) { return -1; }
+static void *seekdb_cuvs_deserialize_graph(const char *, const float *, long, long) { return nullptr; }
 #endif
 
 namespace oceanbase {
@@ -317,17 +321,26 @@ static bool ob_cuvs_try_search(void *key, vsag::Allocator *alloc,
   return true;
 }
 
-static const char OB_CUVS_SNAPSHOT_MAGIC[8] = {'O', 'B', 'C', 'U', 'V', 'S', '0', '2'};
+// V3 retains one FP32 dataset in the outer stream and stores only the graph
+// in the bridge payload. Keep V2 readable for existing on-disk indexes.
+static const char OB_CUVS_SNAPSHOT_MAGIC[8] = {'O', 'B', 'C', 'U', 'V', 'S', '0', '3'};
+static const char OB_CUVS_SNAPSHOT_MAGIC_V2[8] = {'O', 'B', 'C', 'U', 'V', 'S', '0', '2'};
 struct ObCuvsSnapshotJob {
   const char *path_; void *handle_; long n_; long dim_; bool load_; int rc_;
+  const float *base_ = nullptr;
+  bool graph_only_ = false;
 };
 static void *ob_cuvs_snapshot_job(void *arg) {
   ObCuvsSnapshotJob *job = static_cast<ObCuvsSnapshotJob *>(arg);
   if (job->load_) {
-    job->handle_ = seekdb_cuvs_deserialize(job->path_, job->n_, job->dim_);
+    job->handle_ = job->graph_only_
+        ? seekdb_cuvs_deserialize_graph(job->path_, job->base_, job->n_, job->dim_)
+        : seekdb_cuvs_deserialize(job->path_, job->n_, job->dim_);
     job->rc_ = job->handle_ == nullptr ? -1 : 0;
   } else {
-    job->rc_ = seekdb_cuvs_serialize(job->handle_, job->path_);
+    job->rc_ = job->graph_only_
+        ? seekdb_cuvs_serialize_graph(job->handle_, job->path_)
+        : seekdb_cuvs_serialize(job->handle_, job->path_);
   }
   return nullptr;
 }
@@ -386,6 +399,7 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
   }
   CuvsSnapshotFile graph;
   ObCuvsSnapshotJob job{graph.path_, ent->bridge_.get(), static_cast<long>(n), ent->dim_, false, -1};
+  job.graph_only_ = true;
   if (graph.file_ == nullptr || !ob_cuvs_snapshot_big_stack(job) ||
       ::fseeko(graph.file_, 0, SEEK_END) != 0 || ::ftello(graph.file_) <= 0) {
     ret = OB_ERR_VSAG_RETURN_ERROR;
@@ -424,7 +438,7 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
 }
 
 // Consumes the stream after the magic. Registers and marks the handle for GPU search.
-static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
+static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in, bool graph_only) {
   int ret = OB_SUCCESS;
   uint64_t graph_bytes = 0;
   int32_t dim32 = 0;
@@ -464,6 +478,8 @@ static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
         remaining -= bytes;
       }
       ObCuvsSnapshotJob job{graph.path_, nullptr, static_cast<long>(n), dim32, true, -1};
+      job.base_ = ent->buf_vecs_.data();
+      job.graph_only_ = graph_only;
       if (graph.file_ == nullptr || remaining != 0 || ::fflush(graph.file_) != 0 ||
           !ob_cuvs_snapshot_big_stack(job)) {
         delete ent;
@@ -1919,9 +1935,12 @@ int fdeserialize(VectorIndexPtr &index_handler,
       char magic[sizeof(OB_CUVS_SNAPSHOT_MAGIC)] = {0};
       std::streambuf *sb = in_stream.rdbuf();
       const std::streamsize got = sb->sgetn(magic, sizeof(magic));
-      if (got == static_cast<std::streamsize>(sizeof(magic)) &&
-          0 == memcmp(magic, OB_CUVS_SNAPSHOT_MAGIC, sizeof(magic))) {
-        return ob_cuvs_deserialize(index_handler, dim, in_stream);
+      if (got == static_cast<std::streamsize>(sizeof(magic))) {
+        if (0 == memcmp(magic, OB_CUVS_SNAPSHOT_MAGIC, sizeof(magic))) {
+          return ob_cuvs_deserialize(index_handler, dim, in_stream, true);
+        } else if (0 == memcmp(magic, OB_CUVS_SNAPSHOT_MAGIC_V2, sizeof(magic))) {
+          return ob_cuvs_deserialize(index_handler, dim, in_stream, false);
+        }
       }
       if (sb->pubseekoff(-got, std::ios_base::cur, std::ios_base::in) == std::streampos(-1)) {
         ret = OB_ERR_UNEXPECTED;

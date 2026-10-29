@@ -38,7 +38,9 @@ scores. Use the organizer's full SQL harness and external GPU profiler for forma
 validation, including CPU VSAG behavior and fallback checks.
 
 The candidate keeps V5's FP32 input, CAGRA NN_DESCENT 128/256/100 build settings,
-itopk=max(library_default,512,4*k), search_width=4, and OBCUVS02 snapshot bytes.
+itopk=max(library_default,512,4*k), search_width=4, and exact original CAGRA graph/data values. New snapshots use OBCUVS03:
+one outer FP32 dataset plus the graph-only SKCGRPH1 payload. Existing OBCUVS02
+snapshots remain readable through the original hipVS deserializer.
 The persistent worker is synchronous and must not recursively submit work to
 itself. The adaptor's existing index-registry serialization remains in place.
 The bridge serializes search/serialize calls per handle; freeing a handle requires
@@ -46,3 +48,21 @@ exclusive ownership. Device workspace is retained until index destruction at its
 largest requested shape. Linux snapshot scratch uses memfd (host RAM), with
 `tmpfile()` fallback if memfd creation is unavailable; it is destroyed after every
 snapshot operation and is never reused across builds or benchmark rounds.
+
+
+Graph-only real-GPU validation (not yet run on the new candidate):
+
+```sh
+c++ -std=c++17 unittest/oblib/vector/test_cuvs_graph_gpu.cpp \
+  -Itools/hipvs_bridge -L/path/to/candidate/bridge \
+  -Wl,-rpath,/path/to/candidate/bridge -lseekdb_cuvs_bridge \
+  -o /results/test_cuvs_graph_gpu
+LD_LIBRARY_PATH=/path/to/candidate/bridge:/opt/hipvs/lib:/opt/rocm/lib \
+  /results/test_cuvs_graph_gpu /results/new-graph-roundtrip
+```
+
+It requires a new output directory and checks that original, legacy-reloaded and
+graph-only-reloaded indexes return the same IDs/distances and export exactly the
+same graph bytes. A passing host protocol test does not replace this GPU run.
+Also validate an actual OBCUVS02 SQL index created with V5 across a server binary
+upgrade, and a fresh OBCUVS03 SQL index across restart.
