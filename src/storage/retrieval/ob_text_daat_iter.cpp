@@ -78,6 +78,76 @@ int ObTextDaaTIter::pre_process()
   return ret;
 }
 
+int ObTextDaaTIter::do_one_merge_round(int64_t &count)
+{
+  // At most three ordered posting streams need only a linear head selection.
+  // Keep the general heap for scoring, Boolean logic, functional lookup and
+  // larger queries. The ordinary collector still enforces minimum_should_match.
+  if (mode_flag_ != sql::NATURAL_LANGUAGE_MODE || function_lookup_mode_
+      || iter_param_->need_project_relevance() || iter_param_->need_filter()
+      || dim_iters_->count() > ObSRSimpleMerger::USE_SIMPLE_MERGER_MAX_TABLE_CNT) {
+    return ObSRDaaTIterImpl::do_one_merge_round(count);
+  }
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < next_round_cnt_; ++i) {
+    const int64_t index = next_round_iter_idxes_[i];
+    ObISRDaaTDimIter *iter = dim_iters_->at(index);
+    if (OB_ISNULL(iter)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(iter->get_next_row())) {
+      if (ret == OB_ITER_END) {
+        iter_domain_ids_[index] = nullptr;
+        ret = OB_SUCCESS;
+      }
+    } else if (OB_FAIL(iter->get_curr_id(iter_domain_ids_[index]))) {
+    }
+  }
+  next_round_cnt_ = 0;
+  int64_t minimum = -1;
+  for (int64_t i = 0; OB_SUCC(ret) && i < dim_iters_->count(); ++i) {
+    if (iter_domain_ids_[i] == nullptr) {
+    } else if (minimum < 0) {
+      minimum = i;
+    } else {
+      ObSRMergeItem left, right;
+      left.iter_idx_ = i;
+      right.iter_idx_ = minimum;
+      int64_t comparison = 0;
+      if (OB_FAIL(merge_cmp_.cmp(left, right, comparison))) {
+      } else if (comparison < 0) {
+        minimum = i;
+      }
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (minimum < 0) {
+    ret = OB_ITER_END;
+  } else {
+    const ObDatum *id = iter_domain_ids_[minimum];
+    for (int64_t i = 0; OB_SUCC(ret) && i < dim_iters_->count(); ++i) {
+      if (iter_domain_ids_[i] != nullptr) {
+        ObSRMergeItem left, right;
+        left.iter_idx_ = i;
+        right.iter_idx_ = minimum;
+        int64_t comparison = 0;
+        if (i != minimum && OB_FAIL(merge_cmp_.cmp(left, right, comparison))) {
+        } else if (comparison == 0) {
+          next_round_iter_idxes_[next_round_cnt_++] = i;
+          id = iter_domain_ids_[i];
+          ret = relevance_collector_->collect_one_dim(i, 0.0);
+        }
+      }
+    }
+    double relevance = 0.0;
+    bool valid = false;
+    if (OB_SUCC(ret) && OB_FAIL(relevance_collector_->get_result(relevance, valid))) {
+    } else if (OB_SUCC(ret) && valid) {
+      ret = cache_result(count, *id, relevance);
+    }
+  }
+  return ret;
+}
+
 ObTextBMWIter::ObTextBMWIter()
   : ObSRBMWIterImpl(),
     bm25_param_estimator_() {}
