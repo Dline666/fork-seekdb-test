@@ -108,6 +108,7 @@ int ObTextDaaTIter::do_one_merge_round(int64_t &count)
     if (iter_domain_ids_[i] == nullptr) {
     } else if (minimum < 0) {
       minimum = i;
+      next_round_iter_idxes_[next_round_cnt_++] = i;
     } else {
       ObSRMergeItem left, right;
       left.iter_idx_ = i;
@@ -116,6 +117,10 @@ int ObTextDaaTIter::do_one_merge_round(int64_t &count)
       if (OB_FAIL(merge_cmp_.cmp(left, right, comparison))) {
       } else if (comparison < 0) {
         minimum = i;
+        next_round_cnt_ = 0;
+        next_round_iter_idxes_[next_round_cnt_++] = i;
+      } else if (comparison == 0) {
+        next_round_iter_idxes_[next_round_cnt_++] = i;
       }
     }
   }
@@ -123,20 +128,9 @@ int ObTextDaaTIter::do_one_merge_round(int64_t &count)
   } else if (minimum < 0) {
     ret = OB_ITER_END;
   } else {
-    const ObDatum *id = iter_domain_ids_[minimum];
-    for (int64_t i = 0; OB_SUCC(ret) && i < dim_iters_->count(); ++i) {
-      if (iter_domain_ids_[i] != nullptr) {
-        ObSRMergeItem left, right;
-        left.iter_idx_ = i;
-        right.iter_idx_ = minimum;
-        int64_t comparison = 0;
-        if (i != minimum && OB_FAIL(merge_cmp_.cmp(left, right, comparison))) {
-        } else if (comparison == 0) {
-          next_round_iter_idxes_[next_round_cnt_++] = i;
-          id = iter_domain_ids_[i];
-          ret = relevance_collector_->collect_one_dim(i, 0.0);
-        }
-      }
+    const ObDatum *id = iter_domain_ids_[next_round_iter_idxes_[next_round_cnt_ - 1]];
+    for (int64_t i = 0; OB_SUCC(ret) && i < next_round_cnt_; ++i) {
+      ret = relevance_collector_->collect_one_dim(next_round_iter_idxes_[i], 0.0);
     }
     double relevance = 0.0;
     bool valid = false;
