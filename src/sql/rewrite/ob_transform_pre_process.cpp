@@ -178,10 +178,13 @@ int ObTransformPreProcess::transform_one_stmt(common::ObIArray<ObParentDMLStmt> 
       }
     }
     if (OB_SUCC(ret)) {
-      if (stmt->get_match_exprs().count() > 0
-          && !fulltext_rows_consumed_only_by_count(parent_stmts, stmt) &&
-          OB_FAIL(preserve_order_for_fulltext_search(stmt, is_happened))) {
-      } else {
+      is_happened = false;
+      if (stmt->get_match_exprs().count() == 0) {
+      } else if (fulltext_rows_consumed_only_by_count(parent_stmts, stmt)) {
+        ret = prune_count_only_fulltext_projection(parent_stmts, stmt, is_happened);
+      } else if (OB_FAIL(preserve_order_for_fulltext_search(stmt, is_happened))) {
+      }
+      if (OB_SUCC(ret)) {
         trans_happened |= is_happened;
       }
     }
@@ -3785,6 +3788,45 @@ int ObTransformPreProcess::do_flatten_conditions(ObDMLStmt *stmt, ObIArray<ObRaw
   } else if (trans_happened) {
     trans_happened =  flatten_happend ;
     OPT_TRACE("   flatten_happend:", flatten_happend);
+  }
+  return ret;
+}
+
+int ObTransformPreProcess::prune_count_only_fulltext_projection(
+    const ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &trans_happened)
+{
+  int ret = OB_SUCCESS;
+  trans_happened = false;
+  if (!fulltext_rows_consumed_only_by_count(parent_stmts, stmt)) {
+    // Keep this mutation subject to the same guards as removing implicit order.
+  } else {
+    ObSelectStmt *child = static_cast<ObSelectStmt *>(stmt);
+    ObDMLStmt *parent = parent_stmts.at(parent_stmts.count() - 1).stmt_;
+    if (child->get_table_size() != 1 || child->get_from_item_size() != 1
+        || nullptr == child->get_table_item(0) || !child->get_table_item(0)->is_basic_table()
+        || !child->get_joined_tables().empty() || !child->get_semi_infos().empty()
+        || child->has_distinct() || child->has_group_by() || child->has_window_function()
+        || child->has_having() || child->get_rollup_expr_size() != 0) {
+      // Replacing a DISTINCT/grouping projection can change its cardinality.
+    } else if (child->get_select_item_size() == 1
+               && child->get_select_item(0).expr_->is_const_raw_expr()) {
+      // Already a single literal/dummy output; do not create a fresh one per pass.
+    } else {
+      ObSqlBitSet<> removed_idxs;
+      const uint64_t table_id = parent->get_table_item(0)->table_id_;
+      for (int64_t i = 0; OB_SUCC(ret) && i < child->get_select_item_size(); ++i) {
+        ret = removed_idxs.add_member(i);
+      }
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(ObTransformUtils::remove_select_items(
+          ctx_, table_id, *child, *parent, removed_idxs))) {
+      } else {
+        // The shared utility removes parent ColumnItems and creates SELECT 1.
+        // transform_self re-formalizes this child's expression references when
+        // trans_happened is true; the POST_ORDER parent is formalized afterward.
+        trans_happened = true;
+      }
+    }
   }
   return ret;
 }

@@ -93,6 +93,16 @@ def main():
                 assert 'calc_relevance=true' not in plan, (name, plan)
                 assert 'with_ties(' not in plan, (name, 'FTS topk annotation remains', plan)
                 assert re.search(r'\blimit\b', plan, re.I), (name, 'No ordinary LIMIT', plan)
+                assert 'is_index_back=false' in plan and 'is_index_back=true' not in plan, (
+                    name, 'Unused projection still causes index lookup', plan)
+                assert not re.search(r'\b(?:TABLE|DOMAIN|DOC.?ID)\s+LOOKUP\b', plan, re.I), (
+                    name, 'Lookup operator remains', plan)
+                # Literal dummy outputs are legitimate. A base-table datum in
+                # access/output would still materialize the unused projection.
+                materialization = '\n'.join(line for line in plan.splitlines()
+                                             if re.search(r'\b(?:output|access)\(', line))
+                assert not re.search(r'\bdocs\.', materialization, re.I), (
+                    name, 'Base-table output/access remains', plan)
 
     try:
         query('create database `' + database + '`')
@@ -136,6 +146,10 @@ def main():
             'nested values': "select count(*) from (select id from (select id from docs where match(content) against('alpha bravo') limit 20)t where id<80)u",
             'score projection': "select count(*) from (select id,match(content) against('alpha bravo') score from docs where match(content) against('alpha bravo') limit 20)t",
             'expression projection': "select count(*) from (select id+1 x from docs where match(content) against('alpha bravo') limit 20)t",
+            'inner distinct': "select count(*) from (select distinct category from docs where match(content) against('alpha bravo') limit 20)t",
+            'inner group': "select count(*) from (select category from docs where match(content) against('alpha bravo') group by category limit 20)t",
+            'inner window': "select count(*) from (select id,row_number() over(order by id) rn from docs where match(content) against('alpha bravo') limit 20)t",
+            'inner having': "select count(*) from (select category from docs where match(content) against('alpha bravo') group by category having count(*)>1 limit 20)t",
         }
         for name, sql in controls.items():
             capture(name, sql)

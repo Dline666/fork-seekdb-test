@@ -378,6 +378,8 @@ private:
   int preserve_order_for_fulltext_search(ObDMLStmt *stmt, bool& trans_happened);
   static bool fulltext_rows_consumed_only_by_count(
       const common::ObIArray<ObParentDMLStmt> &parent_stmts, const ObDMLStmt *stmt);
+  int prune_count_only_fulltext_projection(
+      const common::ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &trans_happened);
 
   int flatten_conditions(ObDMLStmt *stmt, bool &trans_happened);
   int recursive_flatten_join_conditions(ObDMLStmt *stmt, TableItem *table, bool &trans_happened);
