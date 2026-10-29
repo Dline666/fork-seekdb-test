@@ -1894,7 +1894,17 @@ int ObTscCgService::generate_text_ir_ctdef(const ObLogTableScan &op,
 
   if (OB_SUCC(ret)) {
     root_ctdef = ir_scan_ctdef;
-    if (OB_FAIL(generate_text_ir_spec_exprs(tr_info, *ir_scan_ctdef))) {
+    // A scan with no output values or remaining filters supplies row counts
+    // to its parent. It still merges actual posting IDs under the same read
+    // snapshot, but does not need to materialize those IDs as output datums.
+    const bool cardinality_only = !tr_info.need_calc_relevance_
+        && tr_info.pushdown_match_filter_ == nullptr && op.get_output_exprs().empty()
+        && !op.get_index_back() && op.get_filter_exprs().empty()
+        && op.get_pushdown_filter_exprs().empty() && !cg_ctx.is_func_lookup_
+        && !cg_ctx.is_vec_iter_func_lookup_ && !cg_ctx.is_es_match_
+        && !cg_ctx.is_merge_fts_index_ && !op.is_vec_adaptive_scan()
+        && !op.is_vec_idx_scan_post_filter();
+    if (OB_FAIL(generate_text_ir_spec_exprs(tr_info, *ir_scan_ctdef, !cardinality_only))) {
     } else {
       const ObCostTableScanInfo *est_cost_info = op.get_est_cost_info();
       int partition_row_cnt = 0;
@@ -2995,7 +3005,8 @@ int ObTscCgService::generate_spiv_block_max_spec(
 }
 
 int ObTscCgService::generate_text_ir_spec_exprs(const ObTextRetrievalInfo &tr_info,
-                                                ObDASIRScanCtDef &text_ir_scan_ctdef)
+                                                ObDASIRScanCtDef &text_ir_scan_ctdef,
+                                                bool emit_domain_id)
 {
   int ret = OB_SUCCESS;
   ObSEArray<ObExpr *, 4> result_output;
@@ -3031,7 +3042,7 @@ int ObTscCgService::generate_text_ir_spec_exprs(const ObTextRetrievalInfo &tr_in
         text_ir_scan_ctdef.inv_scan_doc_length_col_ =
             text_ir_scan_ctdef.get_inv_idx_scan_ctdef()->pd_expr_spec_.access_exprs_.at(doc_length_col_idx);
       }
-      if (OB_FAIL(result_output.push_back(text_ir_scan_ctdef.inv_scan_domain_id_col_))) {
+      if (emit_domain_id && OB_FAIL(result_output.push_back(text_ir_scan_ctdef.inv_scan_domain_id_col_))) {
       }
     }
   }

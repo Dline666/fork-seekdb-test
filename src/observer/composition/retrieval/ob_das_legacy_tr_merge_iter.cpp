@@ -380,6 +380,7 @@ int ObDASLegacyTRMergeIter::create_sparse_retrieval_iter()
   sr_iter_param_.id_proj_expr_ = ir_ctdef_->inv_scan_domain_id_col_;
   sr_iter_param_.relevance_expr_ = ir_ctdef_->relevance_expr_;
   sr_iter_param_.relevance_proj_expr_ = ir_ctdef_->relevance_proj_col_;
+  sr_iter_param_.emit_domain_id_ = !ir_ctdef_->result_output_.empty();
   sr_iter_param_.filter_expr_ = ir_ctdef_->match_filter_;
   sr_iter_param_.topk_limit_ = topk_limit_;
   if (OB_NOT_NULL(ir_ctdef_->field_boost_expr_)) {

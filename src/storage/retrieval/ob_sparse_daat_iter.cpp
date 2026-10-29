@@ -396,7 +396,9 @@ int ObSRDaaTIterImpl::cache_result(int64_t &count, const ObDatum &id_datum, cons
   } else if (OB_UNLIKELY(count >= buffered_domain_ids_.count() || count >= buffered_relevances_.count())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    buffered_domain_ids_[count].from_datum(id_datum);
+    if (iter_param_->emit_domain_id_) {
+      buffered_domain_ids_[count].from_datum(id_datum);
+    }
     buffered_relevances_[count] = relevance;
     ++count;
     ++output_row_cnt_;
@@ -409,6 +411,9 @@ int ObSRDaaTIterImpl::cache_result(int64_t &count, const ObDatum &id_datum, cons
 
 int ObSRDaaTIterImpl::project_results(const int64_t count)
 {
+  if (!iter_param_->emit_domain_id_ && !iter_param_->need_project_relevance()) {
+    return OB_SUCCESS;
+  }
   int ret = OB_SUCCESS;
   ObExpr *relevance_proj_expr = iter_param_->relevance_proj_expr_;
   ObExpr *id_proj_expr = iter_param_->id_proj_expr_;
