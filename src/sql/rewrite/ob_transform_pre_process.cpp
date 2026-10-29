@@ -3799,8 +3799,10 @@ bool ObTransformPreProcess::fulltext_rows_consumed_only_by_count(
     if (nullptr != parent_stmt && parent_stmt->is_select_stmt()) {
       const ObSelectStmt *parent = static_cast<const ObSelectStmt *>(parent_stmt);
       if (!child->is_set_stmt() && !child->is_calc_found_rows()
+          && !child->has_for_update() && !child->is_contains_assignment()
           && !child->has_order_by() && child->get_subquery_expr_size() == 0
           && !parent->is_set_stmt() && parent->get_table_size() == 1
+          && !parent->has_for_update() && !parent->is_contains_assignment()
           && parent->get_from_item_size() == 1 && parent->get_joined_tables().empty()
           && parent->get_semi_infos().empty() && parent->get_condition_size() == 0
           && !parent->has_group_by() && !parent->has_distinct()
@@ -3824,6 +3826,17 @@ bool ObTransformPreProcess::fulltext_rows_consumed_only_by_count(
           const ObMatchFunRawExpr *match = child->get_match_exprs().at(i);
           count_only = nullptr != match && !match->is_es_match()
                        && match->get_mode_flag() == NATURAL_LANGUAGE_MODE;
+        }
+        for (int64_t i = 0; count_only && i < child->get_condition_size(); ++i) {
+          const ObRawExpr *condition = child->get_condition_expr(i);
+          count_only = nullptr != condition && !condition->has_flag(CNT_STATE_FUNC)
+                       && !condition->has_flag(CNT_DYNAMIC_USER_VARIABLE)
+                       && !condition->has_flag(CNT_RAND_FUNC)
+                       && !condition->has_flag(CNT_VOLATILE_CONST)
+                       && !condition->has_flag(CNT_ASSIGN_EXPR)
+                       && !condition->has_flag(CNT_LAST_INSERT_ID)
+                       && !condition->has_flag(CNT_PL_UDF)
+                       && !condition->has_flag(CNT_SUB_QUERY);
         }
       }
     }

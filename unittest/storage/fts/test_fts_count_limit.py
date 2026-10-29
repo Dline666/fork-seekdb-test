@@ -151,6 +151,36 @@ def main():
                 "where match(content) against('alpha bravo') limit 20)t where t.id>d.id) "
                 "from docs d where d.id in (1,30,100) order by d.id")
 
+        side_effect_controls = {
+            'where assignment': "select count(*) from (select id from docs where "
+                "match(content) against('alpha bravo') and (@counter:=@counter+1)>0 limit 20)t",
+            'where last insert id': "select count(*) from (select id from docs where "
+                "match(content) against('alpha bravo') and last_insert_id(id)>0 limit 20)t",
+        }
+        for name, sql in side_effect_controls.items():
+            query('set @counter=0')
+            query('select last_insert_id(0)')
+            capture(name, sql)
+            capture(name + ' state', 'select @counter,last_insert_id()')
+            explain(name, sql, score=None)
+
+        # Probe FOR UPDATE on the baseline too: some supported server modes
+        # reject a locking clause within a derived table. Record that explicit
+        # capability result, rather than counting a rejected query as coverage.
+        locking_sql = ("select count(*) from (select id from docs where "
+                       "match(content) against('alpha bravo') limit 20 for update)t")
+        query('start transaction')
+        try:
+            capture('inner for update', locking_sql)
+            explain('inner for update', locking_sql, score=None)
+        except pymysql.MySQLError as error:
+            if error.args[0] not in (1064, 1235):
+                raise
+            results['inner for update'] = {'unsupported_error_code': error.args[0]}
+            print('FOR UPDATE derived-table syntax unsupported:', error.args[0], flush=True)
+        finally:
+            query('rollback')
+
         query("prepare count_limit_stmt from 'select count(*) from (select id from docs "
               "where match(content) against(?)>? limit ? offset ?)t'")
         for repeat in range(2):
