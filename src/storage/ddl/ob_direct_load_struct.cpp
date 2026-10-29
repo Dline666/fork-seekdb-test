@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_direct_load_struct.h"
+#include "storage/ddl/ob_hnsw_vector_batch.h"
 #include "data_plane/vector/ob_i_vector_index_runtime.h"
 #include "storage/ddl/ob_ddl_vector_utils.h"
 #include "storage/ddl/ob_ddl_storage_util.h"
@@ -146,7 +147,7 @@ public:
     : ObVectorIndexBaseSliceStore(), vec_allocator_("VecIdxSS", OB_MALLOC_NORMAL_BLOCK_SIZE),
       tmp_allocator_("VecIdxSSAR", OB_MALLOC_NORMAL_BLOCK_SIZE),
       ctx_(), vector_vid_col_idx_(-1),
-      vector_col_idx_(-1)
+      vector_col_idx_(-1), cuvs_batch_enabled_(false)
   {
     extra_column_idx_types_.set_attr(ObMemAttr("VecIdxExCol"));
   }
@@ -157,6 +158,11 @@ public:
       const ObIArray<ObColumnSchemaItem> &col_array,
       const int64_t context_id) override;
   virtual int append_row(const blocksstable::ObDatumRow &datum_row) override;
+  virtual int close() override;
+  virtual void cancel() override
+  {
+    if (cuvs_batch_enabled_) { cuvs_batch_gate_.cancel(); }
+  }
   void reset();
   int serialize_vector_index(
       ObIAllocator *allocator,
@@ -174,6 +180,8 @@ public:
       K(ctx_), K(vector_vid_col_idx_), K(vector_col_idx_), K(vector_key_col_idx_), K(vector_data_col_idx_), K(extra_column_idx_types_));
 private:
   bool is_vec_idx_col_invalid(const int64_t column_cnt) const;
+  int append_cuvs_row(const blocksstable::ObDatumRow &datum_row);
+  int flush_cuvs_batch();
 public:
   ObArenaAllocator vec_allocator_;
   ObArenaAllocator tmp_allocator_;
@@ -183,6 +191,9 @@ public:
   int32_t vector_key_col_idx_;
   int32_t vector_data_col_idx_;
   ObSEArray<ObExtraInfoIdxType, 4> extra_column_idx_types_;
+  bool cuvs_batch_enabled_;
+  HnswVectorBatch cuvs_batch_;
+  HnswBatchDispatchGate cuvs_batch_gate_;
 };
 
 class ObIvfSliceStore : public ObVectorIndexBaseSliceStore
@@ -1801,6 +1812,31 @@ int ObVectorIndexSliceStore::init(
                  K(vector_key_col_idx_), K(vector_data_col_idx_), K(col_array));
       }
     }
+    if (OB_SUCC(ret) && extra_column_idx_types_.empty()) {
+      ObVectorIndexParam param;
+      // Unknown/invalid parameters retain the original row-path validation.
+      if (OB_SUCCESS == ObVectorIndexUtil::parser_params_from_string(
+              vec_idx_param_, ObVectorIndexType::VIT_HNSW_INDEX, param, false)) {
+        cuvs_batch_enabled_ = param.lib_ == ObVectorIndexAlgorithmLib::VIAL_CUVS &&
+            param.dist_algorithm_ == ObVectorIndexDistAlgorithm::VIDA_L2 &&
+            (param.type_ == VIAT_HNSW || param.type_ == VIAT_HGRAPH);
+      }
+      if (OB_SUCC(ret) && cuvs_batch_enabled_) {
+        const int64_t capacity = HnswVectorBatch::row_capacity(vec_dim_);
+        float *values = nullptr;
+        int64_t *vids = nullptr;
+        if (capacity <= 0) {
+          ret = OB_INVALID_ARGUMENT;
+        } else if (OB_ISNULL(values = static_cast<float *>(
+                       vec_allocator_.alloc(sizeof(float) * capacity * vec_dim_))) ||
+                   OB_ISNULL(vids = static_cast<int64_t *>(
+                       vec_allocator_.alloc(sizeof(int64_t) * capacity)))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else if (!cuvs_batch_.init(values, vids, vec_dim_, capacity)) {
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+    }
   }
   return ret;
 }
@@ -1910,12 +1946,94 @@ void ObVectorIndexBaseSliceStore::reset()
   current_row_.reset();
 }
 
+int ObVectorIndexSliceStore::flush_cuvs_batch()
+{
+  int ret = OB_SUCCESS;
+  if (cuvs_batch_gate_.canceled()) {
+    ret = OB_CANCELED;
+  } else if (cuvs_batch_.count() > 0) {
+    ObIVectorIndexRuntime *service =
+        ::oceanbase::share::server_service<::oceanbase::storage::ObIVectorIndexRuntime>();
+    ObPluginVectorIndexAdapterGuard adaptor_guard;
+    if (OB_ISNULL(service)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(service->acquire_adapter_guard(tablet_id_,
+                   ObIndexType::INDEX_TYPE_VEC_INDEX_SNAPSHOT_DATA_LOCAL, adaptor_guard,
+                   &vec_idx_param_, vec_dim_))) {
+    } else if (OB_ISNULL(adaptor_guard.get_adatper())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      ret = cuvs_batch_.flush([this, &adaptor_guard](float *values, int64_t *ids, int count) {
+        int batch_ret = OB_SUCCESS;
+        if (!cuvs_batch_gate_.try_begin()) {
+          batch_ret = cuvs_batch_gate_.canceled() ? OB_CANCELED : OB_ERR_UNEXPECTED;
+        } else {
+          struct FinishDispatch {
+            HnswBatchDispatchGate &gate_;
+            ~FinishDispatch() { gate_.finish(); }
+          } finish_dispatch{cuvs_batch_gate_};
+          batch_ret = adaptor_guard.get_adatper()->add_snap_index(values, ids, nullptr, 0, count);
+        }
+        return batch_ret;
+      });
+    }
+  }
+  return ret;
+}
+
+int ObVectorIndexSliceStore::append_cuvs_row(const blocksstable::ObDatumRow &datum_row)
+{
+  int ret = OB_SUCCESS;
+  if (cuvs_batch_gate_.canceled()) {
+    ret = OB_CANCELED;
+  } else if (vector_vid_col_idx_ < 0 || vector_col_idx_ < 0 ||
+      datum_row.get_column_count() <= vector_vid_col_idx_ ||
+      datum_row.get_column_count() <= vector_col_idx_) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (datum_row.storage_datums_[vector_col_idx_].is_null() ||
+             datum_row.storage_datums_[vector_col_idx_].is_nop()) {
+    // Keep the vector and vid buffers aligned when an input row is skipped.
+  } else {
+    ObString value = datum_row.storage_datums_[vector_col_idx_].get_string();
+    if (OB_FAIL(read_vector_lob_data(tmp_allocator_, lob_read_service_, value))) {
+    } else if (value.length() == 0) {
+      // Empty vectors are skipped by the original row path as well.
+    } else if (datum_row.storage_datums_[vector_vid_col_idx_].is_null() ||
+               datum_row.storage_datums_[vector_vid_col_idx_].is_nop()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("nonempty vector has invalid vid", K(ret), K(vector_vid_col_idx_));
+    } else if (cuvs_batch_.append(value.ptr(), value.length(),
+                   datum_row.storage_datums_[vector_vid_col_idx_].get_int()) !=
+               HnswVectorBatch::AppendResult::SUCCESS) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid dense vector batch row", K(ret), K(vec_dim_), K(value.length()));
+    } else if (cuvs_batch_.full() && OB_FAIL(flush_cuvs_batch())) {
+    }
+  }
+  tmp_allocator_.reuse();
+  return ret;
+}
+
+int ObVectorIndexSliceStore::close()
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = OB_NOT_INIT;
+  } else if (cuvs_batch_enabled_ && OB_FAIL(flush_cuvs_batch())) {
+  } else {
+    ret = ObVectorIndexBaseSliceStore::close();
+  }
+  return ret;
+}
+
 int ObVectorIndexSliceStore::append_row(const blocksstable::ObDatumRow &datum_row)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
+  } else if (cuvs_batch_enabled_) {
+    ret = append_cuvs_row(datum_row);
   } else {
     // append to vector inedx adaptor
     ObIVectorIndexRuntime *vec_index_service = ::oceanbase::share::server_service<::oceanbase::storage::ObIVectorIndexRuntime>();
@@ -1984,6 +2102,9 @@ int ObVectorIndexSliceStore::append_row(const blocksstable::ObDatumRow &datum_ro
 
 void ObVectorIndexSliceStore::reset()
 {
+  cuvs_batch_.reset();
+  cuvs_batch_gate_.reset();
+  cuvs_batch_enabled_ = false;
   ObVectorIndexBaseSliceStore::reset();
   ctx_.reset();
   vector_vid_col_idx_ = -1;
@@ -2002,6 +2123,11 @@ int ObVectorIndexSliceStore::serialize_vector_index(
     const int64_t snapshot_version)
 {
   int ret = OB_SUCCESS;
+  // The final partial batch must reach the adaptor before snapshot serialization.
+  // Run on this caller's thread, retaining its existing transaction context.
+  if (cuvs_batch_enabled_ && OB_FAIL(flush_cuvs_batch())) {
+    return ret;
+  }
   tmp_allocator_.reuse();
   // first we do vsag serialize
   ObIVectorIndexRuntime *vec_index_service = ::oceanbase::share::server_service<::oceanbase::storage::ObIVectorIndexRuntime>();

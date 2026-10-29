@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX STORAGE
 #include "ob_ddl_pipeline.h"
+#include "storage/ddl/ob_hnsw_vector_batch.h"
 #include "share/rc/ob_server_runtime.h"
 #include "storage/api/storage/vector/ob_i_vector_index_runtime.h"
 #include "storage/ddl/ob_ddl_tablet_context.h"
@@ -889,6 +890,16 @@ int ObHNSWIndexAppendBufferOperator::init(
     vector_key_col_idx_ = vector_index_ctx->vector_key_col_idx_;
     vector_data_col_idx_ = vector_index_ctx->vector_data_col_idx_;
     if (OB_FAIL(extra_column_idx_types_.assign(vector_index_ctx->extra_column_idx_types_))) {
+    } else if (extra_column_idx_types_.empty()) {
+      ObVectorIndexParam param;
+      // Eligibility only: if parsing cannot establish the fast path, keep the
+      // original row path and its existing validation/error behavior.
+      if (OB_SUCCESS == ObVectorIndexUtil::parser_params_from_string(
+              vec_idx_param_, ObVectorIndexType::VIT_HNSW_INDEX, param, false)) {
+        cuvs_batch_enabled_ = param.lib_ == ObVectorIndexAlgorithmLib::VIAL_CUVS &&
+            param.dist_algorithm_ == ObVectorIndexDistAlgorithm::VIDA_L2 &&
+            (param.type_ == VIAT_HNSW || param.type_ == VIAT_HGRAPH);
+      }
     }
   }
   return ret;
@@ -959,10 +970,94 @@ int ObHNSWIndexAppendBufferOperator::append_row(
   return ret;
 }
 
+int ObHNSWIndexAppendBufferOperator::append_cuvs_row_file(
+    ObDDLRowFile *row_file, ObDDLTabletContext *tablet_context)
+{
+  int ret = OB_SUCCESS;
+  ObArenaAllocator batch_allocator("VecIndexBatch", OB_MALLOC_NORMAL_BLOCK_SIZE);
+  ObPluginVectorIndexAdapterGuard adaptor_guard;
+  ObIVectorIndexRuntime *service =
+      ::oceanbase::share::server_service<::oceanbase::storage::ObIVectorIndexRuntime>();
+  const int64_t capacity = HnswVectorBatch::row_capacity(vec_dim_);
+  HnswVectorBatch batch;
+  float *dense_vectors = nullptr;
+  int64_t *vids = nullptr;
+  if (OB_ISNULL(row_file) || OB_ISNULL(tablet_context) || capacity <= 0 ||
+      vector_vid_col_idx_ < 0 || vector_col_idx_ < 0) {
+    ret = OB_INVALID_ARGUMENT;
+  }
+  auto append_batch = [&adaptor_guard](float *values, int64_t *ids, int count) {
+    return adaptor_guard.get_adatper()->add_snap_index(values, ids, nullptr, 0, count);
+  };
+  while (OB_SUCC(ret)) {
+    ObBatchDatumRows *datum_rows = nullptr;
+    if (OB_FAIL(row_file->get_next_batch(datum_rows))) {
+      if (ret == OB_ITER_END) {
+        ret = batch.flush(append_batch);
+        break;
+      }
+    } else if (OB_ISNULL(datum_rows) || datum_rows->row_count_ < 0 ||
+               datum_rows->vectors_.count() <= vector_vid_col_idx_ ||
+               datum_rows->vectors_.count() <= vector_col_idx_ ||
+               OB_ISNULL(datum_rows->vectors_.at(vector_vid_col_idx_)) ||
+               OB_ISNULL(datum_rows->vectors_.at(vector_col_idx_))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      const ObIVector &vectors = *datum_rows->vectors_.at(vector_col_idx_);
+      const ObIVector &ids = *datum_rows->vectors_.at(vector_vid_col_idx_);
+      for (int64_t row = 0; OB_SUCC(ret) && row < datum_rows->row_count_; ++row) {
+        row_allocator_.reuse();
+        if (!vectors.is_null(row)) {
+          ObString value = vectors.get_string(row);
+          if (OB_FAIL(read_full_lob_string(
+                  row_allocator_, ObLongTextType, CS_TYPE_BINARY, true, value))) {
+          } else if (value.length() == 0) {
+            // NULL/empty vectors do not consume a slot or external ID.
+          } else if (ids.is_null(row)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("nonempty vector has invalid vid", K(ret), K(row), K(vector_vid_col_idx_));
+          } else {
+            // Match the original all-NULL/empty-file behavior: create neither
+            // an adaptor nor a staging allocation until the first valid vector.
+            if (!adaptor_guard.is_valid()) {
+              if (OB_ISNULL(service) || OB_ISNULL(tablet_context->vector_index_ctx_)) {
+                ret = OB_ERR_UNEXPECTED;
+              } else if (OB_FAIL(service->acquire_adapter_guard(tablet_id_,
+                             ObIndexType::INDEX_TYPE_VEC_INDEX_SNAPSHOT_DATA_LOCAL, adaptor_guard,
+                             &tablet_context->vector_index_ctx_->vec_idx_param_, vec_dim_))) {
+              } else if (OB_ISNULL(adaptor_guard.get_adatper())) {
+                ret = OB_ERR_UNEXPECTED;
+              } else if (OB_ISNULL(dense_vectors = static_cast<float *>(
+                             batch_allocator.alloc(sizeof(float) * capacity * vec_dim_))) ||
+                         OB_ISNULL(vids = static_cast<int64_t *>(
+                             batch_allocator.alloc(sizeof(int64_t) * capacity)))) {
+                ret = OB_ALLOCATE_MEMORY_FAILED;
+              } else if (!batch.init(dense_vectors, vids, vec_dim_, capacity)) {
+                ret = OB_INVALID_ARGUMENT;
+              }
+            }
+            if (OB_FAIL(ret)) {
+            } else if (batch.append(value.ptr(), value.length(), ids.get_int(row)) !=
+                       HnswVectorBatch::AppendResult::SUCCESS) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("invalid dense vector batch row", K(ret), K(vec_dim_), K(value.length()));
+            } else if (batch.full() && OB_FAIL(batch.flush(append_batch))) {
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObHNSWIndexAppendBufferOperator::append_row_file(ObDDLRowFile *row_file, ObDDLTabletContext *tablet_context)
 {
   int ret = OB_SUCCESS;
   ObBatchDatumRows *datum_rows = nullptr;
+  if (cuvs_batch_enabled_) {
+    return append_cuvs_row_file(row_file, tablet_context);
+  }
   if (OB_ISNULL(row_file) || OB_ISNULL(tablet_context)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(ret), KP(row_file), KP(tablet_context));
