@@ -384,6 +384,8 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
     ent->bridge_ = nb; ent->built_n_ = n; ent->ids_ = ent->buf_ids_;
     built = true;
   }
+  const int64_t graph_build_us = ObTimeUtility::current_time() - start_us;
+  const int64_t serialize_start_us = ObTimeUtility::current_time();
   CuvsSnapshotFile graph;
   ObCuvsSnapshotJob job{graph.path_, ent->bridge_.get(), static_cast<long>(n), ent->dim_, false, -1};
   if (graph.file_ == nullptr || !ob_cuvs_snapshot_big_stack(job) ||
@@ -393,7 +395,9 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
   }
   const uint64_t graph_bytes = static_cast<uint64_t>(::ftello(graph.file_));
   ::rewind(graph.file_);
+  const int64_t serialize_us = ObTimeUtility::current_time() - serialize_start_us;
   const int64_t build_us = ObTimeUtility::current_time() - start_us;
+  const int64_t write_start_us = ObTimeUtility::current_time();
   const int32_t dim32 = ent->dim_;
   const int32_t reserved = 0;
   const int64_t n64 = static_cast<int64_t>(n);
@@ -418,8 +422,10 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
     }
     remaining -= bytes;
   }
+  const int64_t snapshot_write_us = ObTimeUtility::current_time() - write_start_us;
   LOG_INFO("[OBVSAG][cuVS] serialized GPU CAGRA snapshot", KP(key), K(n), K(dim32),
-           K(built), K(build_us), K(graph_bytes));
+           K(built), K(build_us), K(graph_build_us), K(serialize_us),
+           K(snapshot_write_us), K(graph_bytes));
   return true;
 }
 

@@ -7,6 +7,8 @@ trap 'rm -rf "$BUILD"' EXIT
 CXX=${CXX:-c++}
 CC=${CC:-cc}
 SANITIZERS=${SANITIZERS:-address,undefined}
+LIBS=""
+if [[ $(uname -s) == Linux ]]; then LIBS="-ldl"; fi
 FLAGS=(-g -O1 -Wall -Wextra -Werror -fno-omit-frame-pointer -pthread)
 if [[ -n "$SANITIZERS" ]]; then FLAGS+=("-fsanitize=$SANITIZERS"); fi
 "$CXX" -std=c++17 "${FLAGS[@]}" -I"$ROOT/src/oblib" \
@@ -21,6 +23,8 @@ for language in c cxx; do
     -I"$TESTS/cuvs_mock" -I"$ROOT/tools/hipvs_bridge" \
     -c "$ROOT/tools/hipvs_bridge/seekdb_cuvs_bridge.c" -o "$BUILD/bridge.o"
   "$CXX" -std=c++17 "${FLAGS[@]}" -I"$TESTS/cuvs_mock" -I"$ROOT/tools/hipvs_bridge" \
-    "$TESTS/test_cuvs_bridge.cpp" "$BUILD/bridge.o" -o "$BUILD/test_bridge"
+    "$TESTS/test_cuvs_bridge.cpp" "$BUILD/bridge.o" $LIBS -o "$BUILD/test_bridge"
   "$BUILD/test_bridge"
 done
+
+bash "$TESTS/run_cuvs_omp_tests.sh"

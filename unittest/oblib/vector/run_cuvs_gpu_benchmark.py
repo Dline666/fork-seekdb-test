@@ -9,6 +9,7 @@ import array
 import ctypes
 import json
 import math
+import os
 from pathlib import Path
 import statistics
 import struct
@@ -90,7 +91,9 @@ def worker(args):
     distances = (ctypes.c_float * max(args.topk))()
     result = {'scope': 'bridge_only_not_SQL_score', 'count': count, 'dimension': dimension,
               'nq': args.nq, 'library': str(Path(args.worker_library).resolve()),
-              'ground_truth_provided': truth is not None, 'queries': {}}
+              'ground_truth_provided': truth is not None, 'queries': {},
+              'omp_num_threads': os.environ.get('OMP_NUM_THREADS'),
+              'omp_wait_policy': os.environ.get('OMP_WAIT_POLICY')}
     handle = None
     try:
         with tempfile.TemporaryDirectory(prefix='seekdb-cagra-gpu-') as directory:
@@ -102,37 +105,56 @@ def worker(args):
             built = time.perf_counter()
             if library.seekdb_cuvs_serialize(handle, snapshot):
                 raise RuntimeError('GPU serialization failed')
+            serialized = time.perf_counter()
             library.seekdb_cuvs_free(handle)
             handle = None
+            released = time.perf_counter()
             handle = library.seekdb_cuvs_deserialize(snapshot, count, dimension)
             if not handle:
                 raise RuntimeError('GPU snapshot reload failed')
+            reloaded = time.perf_counter()
             first_k = args.topk[0]
             if library.seekdb_cuvs_search(handle, query_buffer, 1, first_k, neighbors, distances):
                 raise RuntimeError('first GPU query failed')
+            first_completed = time.perf_counter()
             if len(set(neighbors[:first_k])) != first_k or any(i >= count for i in neighbors[:first_k]):
                 raise RuntimeError('first query result integrity failed')
             result['gpu_build_seconds'] = built - begin
-            result['bridge_build_serialize_reload_first_seconds'] = time.perf_counter() - begin
+            result['serialize_seconds'] = serialized - built
+            result['release_seconds'] = released - serialized
+            result['reload_seconds'] = reloaded - released
+            result['first_query_seconds'] = first_completed - reloaded
+            result['bridge_build_serialize_reload_first_seconds'] = first_completed - begin
             for k in args.topk:
                 latencies = []
                 hits = 0
+                # Prepare pointers before timing; validate IDs/Recall after the
+                # search window so CPU set operations cannot distort GPU QPS.
+                query_pointers = [ctypes.cast(ctypes.byref(query_buffer, row * dimension * 4), fp)
+                                  for row in range(args.nq)]
+                ids_for_all = (ctypes.c_uint * (args.nq * k))()
+                distances_for_all = (ctypes.c_float * (args.nq * k))()
+                output_ids = [ctypes.cast(ctypes.byref(ids_for_all, row * k * 4), ui)
+                              for row in range(args.nq)]
+                output_distances = [ctypes.cast(ctypes.byref(distances_for_all, row * k * 4), fp)
+                                    for row in range(args.nq)]
                 started = time.perf_counter()
                 for row in range(args.nq):
-                    query = ctypes.cast(ctypes.byref(query_buffer, row * dimension * 4), fp)
+                    query = query_pointers[row]
                     tick = time.perf_counter()
-                    if library.seekdb_cuvs_search(handle, query, 1, k, neighbors, distances):
+                    if library.seekdb_cuvs_search(handle, query, 1, k, output_ids[row], output_distances[row]):
                         raise RuntimeError('GPU search failed')
                     latencies.append(time.perf_counter() - tick)
-                    found = neighbors[:k]
+                elapsed = time.perf_counter() - started
+                for row in range(args.nq):
+                    found = ids_for_all[row * k:(row + 1) * k]
                     if len(set(found)) != k or any(index >= count for index in found):
                         raise RuntimeError('result integrity failed')
-                    if any(not math.isfinite(distance) for distance in distances[:k]):
+                    if any(not math.isfinite(distance) for distance in distances_for_all[row * k:(row + 1) * k]):
                         raise RuntimeError('non-finite distance')
                     if truth is not None:
                         expected = set(truth[row * truth_width:row * truth_width + k])
                         hits += len(expected.intersection(found))
-                elapsed = time.perf_counter() - started
                 result['queries'][str(k)] = {'qps': args.nq / elapsed,
                     'p95_ms': sorted(latencies)[math.ceil(0.95 * args.nq) - 1] * 1000,
                     'recall': hits / (args.nq * k) if truth is not None else None,

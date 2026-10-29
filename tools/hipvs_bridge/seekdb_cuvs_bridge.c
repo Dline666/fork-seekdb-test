@@ -1,5 +1,10 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 /* seekdb <-> hipVS bridge: CAGRA with per-index reusable search workspace. */
 #include "seekdb_cuvs_bridge.h"
+#include "seekdb_cuvs_omp.h"
 #include <cuvs/core/c_api.h>
 #include <cuvs/neighbors/cagra.h>
 #include <dlpack/dlpack.h>
@@ -13,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <time.h>
 
 typedef struct {
   cuvsResources_t res;
@@ -76,8 +82,22 @@ void *seekdb_cuvs_build(const float *base, long n, long dim)
   h->ip->graph_degree = 128;
   h->ip->intermediate_graph_degree = 256;
   h->ip->nn_descent_niter = 100;
-  if (cuvsCagraBuild(h->res, h->ip, &dataset, h->idx) != CUVS_SUCCESS ||
-      cuvsStreamSync(h->res) != CUVS_SUCCESS) {
+  sk_cuvs_omp_scope omp_scope;
+  sk_cuvs_omp_begin(&omp_scope);
+  const int omp_previous = omp_scope.previous_threads;
+  const int omp_applied = omp_scope.applied_threads;
+  struct timespec build_start, build_end;
+  const int timer_valid = clock_gettime(CLOCK_MONOTONIC, &build_start) == 0;
+  cuvsError_t build_status = cuvsCagraBuild(h->res, h->ip, &dataset, h->idx);
+  if (build_status == CUVS_SUCCESS) build_status = cuvsStreamSync(h->res);
+  sk_cuvs_omp_end(&omp_scope);
+  if (timer_valid && clock_gettime(CLOCK_MONOTONIC, &build_end) == 0) {
+    const double seconds = (double)(build_end.tv_sec - build_start.tv_sec) +
+                           (double)(build_end.tv_nsec - build_start.tv_nsec) / 1e9;
+    fprintf(stderr, "[seekdb_cuvs] cagra_build n=%ld dim=%ld seconds=%.6f omp_previous=%d omp_applied=%d success=%d\n",
+            n, dim, seconds, omp_previous, omp_applied, build_status == CUVS_SUCCESS);
+  }
+  if (build_status != CUVS_SUCCESS) {
     fprintf(stderr, "[seekdb_cuvs] build failed: %s\n", cuvsGetLastErrorText());
     seekdb_cuvs_free(h);
     return NULL;

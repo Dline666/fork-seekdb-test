@@ -33,6 +33,7 @@ mkdir -p "$(dirname "$OUTPUT")"
   -Wl,-soname,libseekdb_cuvs_bridge.so \
   -Wl,-rpath,"$HIPVS_ROOT/lib:$ROCM_ROOT/lib" \
   -lcuvs_c \
+  -ldl \
   -o "$OUTPUT"
 
 echo "built $OUTPUT"
