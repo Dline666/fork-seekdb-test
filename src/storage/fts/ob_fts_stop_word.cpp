@@ -92,10 +92,12 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
         ret = OB_ERR_UNEXPECTED;
       }
     };
-    if (word.get_collation_type() == stopword_type_.get_collation_type()) {
-      // The stopword table uses the same collation as the common UTF8 input.
-      // Avoid constructing a temporary arena and entering the charset converter
-      // when no conversion is required.
+    if (word.get_collation_type() == stopword_type_.get_collation_type()
+        || (common::ObCharset::is_valid_collation(word.get_collation_type())
+            && common::ObCharset::charset_type_by_coll(word.get_collation_type())
+               == common::ObCharset::charset_type_by_coll(stopword_type_.get_collation_type()))) {
+      // Same-charset conversion borrows the input bytes. Keep the stopword
+      // collation for lookup, without constructing a temporary arena.
       lookup(word.get_word().get_string());
     } else {
       common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
