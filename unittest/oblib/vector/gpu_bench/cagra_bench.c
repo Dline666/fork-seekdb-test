@@ -50,7 +50,10 @@ int main(int argc, char **argv) {
   long nq = argc > 8 ? atol(argv[8]) : nq_all; if (nq > nq_all) nq = nq_all;
 
   hipSetDevice(0); size_t free0, total; hipMemGetInfo(&free0, &total);
+  double tr = now();
   cuvsResources_t res; CK(cuvsResourcesCreate(&res));
+  double res_s = now() - tr;
+  int repeat = getenv("REPEAT") ? atoi(getenv("REPEAT")) : 1;
   cuvsCagraIndexParams_t ip; CK(cuvsCagraIndexParamsCreate(&ip));
   ip->build_algo = !strcmp(algo, "iter") ? ITERATIVE_CAGRA_SEARCH : !strcmp(algo, "ivfpq") ? IVF_PQ : NN_DESCENT;
   ip->graph_degree = degree; ip->intermediate_graph_degree = inter; ip->nn_descent_niter = niter;
@@ -58,9 +61,13 @@ int main(int argc, char **argv) {
   int64_t ds[2] = {n, dim}; DLManagedTensor dset = tensor(base, ds, kDLCPU, kDLFloat, 32);
 
   pthread_t th; pthread_create(&th, NULL, vram_sampler, NULL);
-  double t0 = now();
-  CK(cuvsCagraBuild(res, ip, &dset, idx)); CK(cuvsStreamSync(res));
-  double build_s = now() - t0;
+  double first_s = 0, build_s = 0;
+  for (int rep = 0; rep < repeat; ++rep) {
+    if (rep) { cuvsCagraIndexDestroy(idx); CK(cuvsCagraIndexCreate(&idx)); }
+    double t0 = now();
+    CK(cuvsCagraBuild(res, ip, &dset, idx)); CK(cuvsStreamSync(res));
+    build_s = now() - t0; if (!rep) first_s = build_s;
+  }
   sampling = 0; pthread_join(th, NULL);
 
   cuvsCagraSearchParams_t sp; CK(cuvsCagraSearchParamsCreate(&sp)); size_t default_itopk = sp->itopk_size;
@@ -92,8 +99,8 @@ int main(int argc, char **argv) {
     free(ids); cuvsRMMFree(res, dq, qb); cuvsRMMFree(res, dn, rb); cuvsRMMFree(res, dd, rb);
   }
   printf("{\"algo\":\"%s\",\"degree\":%d,\"inter\":%d,\"niter\":%d,\"n\":%ld,\"dim\":%d,\"nq\":%ld,"
-         "\"build_s\":%.3f,\"peak_vram_mb\":%.1f,\"recall10\":%.5f,\"recall100\":%.5f,\"qps10\":%.1f,\"qps100\":%.1f,"
-         "\"omp\":\"%s\"}\n", algo, degree, inter, niter, n, dim, nq, build_s, (free0 - min_free) / 1048576.0,
+         "\"res_s\":%.3f,\"first_build_s\":%.3f,\"build_s\":%.3f,\"repeat\":%d,\"peak_vram_mb\":%.1f,\"recall10\":%.5f,\"recall100\":%.5f,\"qps10\":%.1f,\"qps100\":%.1f,"
+         "\"omp\":\"%s\"}\n", algo, degree, inter, niter, n, dim, nq, res_s, first_s, build_s, repeat, (free0 - min_free) / 1048576.0,
          recall[0], recall[1], qps[0], qps[1], getenv("OMP_NUM_THREADS") ? getenv("OMP_NUM_THREADS") : "unset");
   cuvsCagraSearchParamsDestroy(sp); cuvsCagraIndexDestroy(idx); cuvsCagraIndexParamsDestroy(ip); cuvsResourcesDestroy(res);
   return 0;
