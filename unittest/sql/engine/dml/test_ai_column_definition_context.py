@@ -199,7 +199,11 @@ def main():
             query('commit')
             query("alter table redefine_docs modify column changed varchar(400) AI COLUMN("
                   "AI_COMPLETE('review_model',concat('new:',content))) WITH(sync_mode='async',max_retries=0)")
-            query('update oceanbase.__all_ai_column_task set lease_until=NULL')
+            # Release only the simulated dead owner's saved sibling. ALTER
+            # has queued a fresh runnable task, which a live worker may already
+            # own; clearing that live lease would manufacture duplicate claims.
+            query("update oceanbase.__all_ai_column_task set lease_until=NULL "
+                  "where owner_id='dead-definition-owner'")
             result('redefine_docs', 'persisted-redefined-sibling')
             for _ in range(150):
                 if query('select changed from redefine_docs') == (('mock:new:redefine-payload',),):
