@@ -19,6 +19,9 @@
 #include <pthread.h>
 #include <sys/types.h>
 
+#define SEEKDB_CUVS_GRAPH_DEGREE 64
+#define SEEKDB_CUVS_INTERMEDIATE_DEGREE 128
+
 typedef struct {
   cuvsResources_t res;
   cuvsCagraIndexParams_t ip;
@@ -76,10 +79,12 @@ void *seekdb_cuvs_build(const float *base, long n, long dim)
   if (!h) return NULL;
   int64_t shape[2] = {n, dim};
   DLManagedTensor dataset = tensor((void *)base, shape, kDLCPU, kDLFloat);
-  // Keep the V5 graph construction and precision parameters unchanged.
+  // FP32 NN_DESCENT CAGRA. SQL m=16 means at most 32 HNSW base-layer links;
+  // 64/128 keeps twice that while cutting NN-descent and detour-pruning work
+  // versus 128/256. Search settings (itopk>=512, width 4) are unchanged.
   h->ip->build_algo = NN_DESCENT;
-  h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
+  h->ip->graph_degree = SEEKDB_CUVS_GRAPH_DEGREE;
+  h->ip->intermediate_graph_degree = SEEKDB_CUVS_INTERMEDIATE_DEGREE;
   h->ip->nn_descent_niter = 100;
   if (cuvsCagraBuild(h->res, h->ip, &dataset, h->idx) != CUVS_SUCCESS ||
       cuvsStreamSync(h->res) != CUVS_SUCCESS) {

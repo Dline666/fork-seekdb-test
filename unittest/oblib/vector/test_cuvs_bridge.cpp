@@ -86,12 +86,12 @@ cuvsError_t cuvsCagraSearchParamsDestroy(cuvsCagraSearchParams_t p)
 cuvsError_t cuvsCagraBuild(cuvsResources_t, cuvsCagraIndexParams_t p, DLManagedTensor *d, cuvsCagraIndex_t idx)
 {
   ++build_calls;
-  assert(p->build_algo == NN_DESCENT && p->graph_degree == 128);
-  assert(p->intermediate_graph_degree == 256 && p->nn_descent_niter == 100);
+  assert(p->build_algo == NN_DESCENT && p->graph_degree == 64);
+  assert(p->intermediate_graph_degree == 128 && p->nn_descent_niter == 100);
   assert(d->manager_ctx == nullptr && d->deleter == nullptr);
   assert(d->dl_tensor.dtype.code == kDLFloat && d->dl_tensor.dtype.bits == 32);
   if (bad("build")) return CUVS_ERROR;
-  idx->n = d->dl_tensor.shape[0]; idx->dim = d->dl_tensor.shape[1]; idx->degree = 128;
+  idx->n = d->dl_tensor.shape[0]; idx->dim = d->dl_tensor.shape[1]; idx->degree = 64;
   GraphState &state = graph_states[idx]; state.graph.resize(idx->n * idx->degree);
   for (int64_t row = 0; row < idx->n; ++row) for (int64_t col = 0; col < idx->degree; ++col)
     state.graph[row * idx->degree + col] = (uint32_t)((row + col + 1) % idx->n);
@@ -311,7 +311,8 @@ static void test_graph_snapshot()
   assert(mkdtemp(directory));
   std::string filename = std::string(directory) + "/graph";
   std::string copyname = std::string(directory) + "/copy";
-  const long n = 4096, dim = 8;
+  // 8192 x 64 x 4 bytes = 2 MiB, so the D2H path must use two 1 MiB chunks.
+  const long n = 8192, dim = 8;
   const size_t base_bytes = (size_t)n * dim * sizeof(float);
   float *base = (float *)mmap(nullptr, base_bytes, PROT_READ | PROT_WRITE,
                               MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -327,8 +328,8 @@ static void test_graph_snapshot()
     for (long row = 0; row < n; ++row) {
       const uint32_t step = ((uint32_t)row * 17U + 3U) | 1U;
       const uint32_t start = (uint32_t)row * 104729U + 37U;
-      for (long col = 0; col < 128; ++col)
-        entry.second.graph[row * 128 + col] = (start + (uint32_t)col * step) % (uint32_t)n;
+      for (long col = 0; col < 64; ++col)
+        entry.second.graph[row * 64 + col] = (start + (uint32_t)col * step) % (uint32_t)n;
     }
   }
   int builds = build_calls, previous_from_args = from_args_calls;
@@ -338,7 +339,7 @@ static void test_graph_snapshot()
   assert(graph_deleters == previous_deleters + 1 && graph_views == 0);
   assert(graph_copies == 2 && largest_graph_copy <= 1024U * 1024U);
   std::vector<unsigned char> original = read_file(filename);
-  assert(original.size() == 48 + (size_t)n * 128 * 4 + 8);
+  assert(original.size() == 48 + (size_t)n * 64 * 4 + 8);
   assert(std::memcmp(original.data(), "SKCGRPH1", 8) == 0);
   assert(original[8] == 1 && original[12] == 48);
   // The first edge of row zero is row 37: explicit little endian on disk.

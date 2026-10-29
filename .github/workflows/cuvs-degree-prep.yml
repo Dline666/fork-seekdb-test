@@ -1,0 +1,63 @@
+name: CUVS degree candidate Linux host validation
+
+on:
+  push:
+    branches: [competition/amd-degree-prep]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cuvs-degree-prep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Record source and toolchain
+        shell: bash
+        run: |
+          mkdir -p validation-artifacts
+          {
+            git rev-parse HEAD
+            gcc --version | head -1
+            g++ --version | head -1
+            uname -sr
+          } > validation-artifacts/environment.txt
+      - name: Startup OpenMP policy and actual Linux exec
+        shell: bash
+        run: |
+          set -o pipefail
+          bash unittest/oblib/vector/startup_omp/run_host_tests.sh 2>&1 | tee validation-artifacts/startup-omp.log
+      - name: Worker, Linux snapshot scratch and graph protocol
+        shell: bash
+        run: |
+          set -o pipefail
+          bash unittest/oblib/vector/run_cuvs_host_tests.sh 2>&1 | tee validation-artifacts/cuvs-host.log
+      - name: Dense input batch and cancellation gate
+        shell: bash
+        run: |
+          set -o pipefail
+          g++ -std=c++17 -O1 -g -Wall -Wextra -Werror -pthread \
+            -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc \
+            unittest/storage/ddl/test_hnsw_vector_batch.cpp -o validation-artifacts/test_hnsw_vector_batch
+          validation-artifacts/test_hnsw_vector_batch 2>&1 | tee validation-artifacts/batch-host.log
+      - name: Preserve validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuvs-degree-linux-${{ github.sha }}
+          path: |
+            validation-artifacts/*.log
+            validation-artifacts/environment.txt
+          if-no-files-found: error
+          retention-days: 14
