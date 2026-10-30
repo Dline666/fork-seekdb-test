@@ -37,7 +37,7 @@ the new snapshot staging helper either. They are diagnostics, never official
 scores. Use the organizer's full SQL harness and external GPU profiler for formal
 validation, including CPU VSAG behavior and fallback checks.
 
-The candidate keeps V5's FP32 input and final degree 128, builds CAGRA NN_DESCENT with intermediate degree 160 and 6 rounds,
+The candidate keeps V5's FP32 input and final degree 128, builds CAGRA NN_DESCENT with intermediate degree 128 and 4 rounds,
 and searches with MULTI_CTA, itopk=max(library_default,2048,4*k), search_width=4, and exact original CAGRA graph/data values. New snapshots use OBCUVS03:
 one outer FP32 dataset plus the graph-only SKCGRPH1 payload. Existing OBCUVS02
 snapshots remain readable through the original hipVS deserializer.

@@ -76,13 +76,13 @@ void *seekdb_cuvs_build(const float *base, long n, long dim)
   if (!h) return NULL;
   int64_t shape[2] = {n, dim};
   DLManagedTensor dataset = tensor((void *)base, shape, kDLCPU, kDLFloat);
-  // FP32 NN_DESCENT, final degree 128 over a 160-wide kNN graph, 6 rounds.
-  // This graph alone loses Recall on real 256-D data with the single-CTA
+  // FP32 NN_DESCENT, final degree 128 over a 128-wide kNN graph, 4 rounds.
+  // Fast graphs lose Recall on real 256-D data with the single-CTA
   // search (itopk capped at 512); search compensates with MULTI_CTA below.
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 160;
-  h->ip->nn_descent_niter = 6;
+  h->ip->intermediate_graph_degree = 128;
+  h->ip->nn_descent_niter = 4;
   if (cuvsCagraBuild(h->res, h->ip, &dataset, h->idx) != CUVS_SUCCESS ||
       cuvsStreamSync(h->res) != CUVS_SUCCESS) {
     fprintf(stderr, "[seekdb_cuvs] build failed: %s\n", cuvsGetLastErrorText());
