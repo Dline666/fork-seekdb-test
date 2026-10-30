@@ -115,7 +115,7 @@ cuvsError_t cuvsCagraSearch(cuvsResources_t, cuvsCagraSearchParams_t p, cuvsCagr
   if (bad("search")) return CUVS_ERROR;
   assert(f.type == NO_FILTER);
   int64_t nq = q->dl_tensor.shape[0], k = neighbors->dl_tensor.shape[1];
-  assert(p->itopk_size == (size_t)std::max<int64_t>(2048, k * 4) && p->search_width == 4);
+  assert(p->itopk_size == (size_t)std::max<int64_t>(4096, k * 4) && p->search_width == 4);
   assert(p->algo == MULTI_CTA);
   assert(q->dl_tensor.shape[1] == idx->dim && k <= idx->n);
   for (int64_t row = 0; row < nq; ++row) {

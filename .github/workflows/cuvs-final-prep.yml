@@ -2,7 +2,7 @@ name: CUVS final candidate Linux host validation
 
 on:
   push:
-    branches: [competition/amd-final-prep, competition/amd-recall-fix, competition/amd-mcta, competition/amd-mcta-fast]
+    branches: [competition/amd-final-prep, competition/amd-recall-fix, competition/amd-mcta, competition/amd-mcta-fast, competition/amd-final-v3]
 
 permissions:
   contents: read

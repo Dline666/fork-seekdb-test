@@ -130,10 +130,10 @@ int seekdb_cuvs_search(void *handle, const float *query, long nq, long topk,
     DLManagedTensor qt = tensor(h->queries, qs, kDLCUDA, kDLFloat);
     DLManagedTensor nt = tensor(h->neighbors, rs, kDLCUDA, kDLUInt);
     DLManagedTensor dt = tensor(h->distances, rs, kDLCUDA, kDLFloat);
-    // MULTI_CTA lifts the single-CTA itopk limit of 512; a 2048-wide
-    // candidate list keeps Recall at or above the V5 graph + single-CTA.
+    // MULTI_CTA lifts the single-CTA itopk limit of 512. A 4096-wide internal
+    // candidate list widens the graph walk for every query.
     size_t required_itopk = (size_t)topk * 4;
-    if (required_itopk < 2048) required_itopk = 2048;
+    if (required_itopk < 4096) required_itopk = 4096;
     // Reset from the library default on EVERY request, including k decreasing.
     h->sp->itopk_size = h->default_itopk > required_itopk ? h->default_itopk : required_itopk;
     h->sp->search_width = 4;
