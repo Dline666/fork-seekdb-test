@@ -76,12 +76,13 @@ void *seekdb_cuvs_build(const float *base, long n, long dim)
   if (!h) return NULL;
   int64_t shape[2] = {n, dim};
   DLManagedTensor dataset = tensor((void *)base, shape, kDLCPU, kDLFloat);
-  // Keep V5's FP32 NN_DESCENT 128/256/100 graph construction. A faster
-  // 128/160/6 graph lost Recall on real-world 256-D data.
+  // FP32 NN_DESCENT, final degree 128 over a 160-wide kNN graph, 6 rounds.
+  // This graph alone loses Recall on real 256-D data with the single-CTA
+  // search (itopk capped at 512); search compensates with MULTI_CTA below.
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
-  h->ip->nn_descent_niter = 100;
+  h->ip->intermediate_graph_degree = 160;
+  h->ip->nn_descent_niter = 6;
   if (cuvsCagraBuild(h->res, h->ip, &dataset, h->idx) != CUVS_SUCCESS ||
       cuvsStreamSync(h->res) != CUVS_SUCCESS) {
     fprintf(stderr, "[seekdb_cuvs] build failed: %s\n", cuvsGetLastErrorText());
@@ -129,11 +130,14 @@ int seekdb_cuvs_search(void *handle, const float *query, long nq, long topk,
     DLManagedTensor qt = tensor(h->queries, qs, kDLCUDA, kDLFloat);
     DLManagedTensor nt = tensor(h->neighbors, rs, kDLCUDA, kDLUInt);
     DLManagedTensor dt = tensor(h->distances, rs, kDLCUDA, kDLFloat);
+    // MULTI_CTA lifts the single-CTA itopk limit of 512; a 2048-wide
+    // candidate list keeps Recall at or above the V5 graph + single-CTA.
     size_t required_itopk = (size_t)topk * 4;
-    if (required_itopk < 512) required_itopk = 512;
+    if (required_itopk < 2048) required_itopk = 2048;
     // Reset from the library default on EVERY request, including k decreasing.
     h->sp->itopk_size = h->default_itopk > required_itopk ? h->default_itopk : required_itopk;
     h->sp->search_width = 4;
+    h->sp->algo = MULTI_CTA;
     cuvsFilter filter; filter.type = NO_FILTER; filter.addr = (uintptr_t)0;
     cuvsError_t search_status = cuvsCagraSearch(h->res, h->sp, h->idx, &qt, &nt, &dt, filter);
     // Cached buffers survive this call. Drain the resource stream even when a

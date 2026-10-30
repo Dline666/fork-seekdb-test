@@ -79,7 +79,7 @@ cuvsError_t cuvsCagraSearchParamsCreate(cuvsCagraSearchParams_t *p)
 {
   ++search_param_calls;
   if (bad("search_params")) return CUVS_ERROR;
-  *p = new cuvsCagraSearchParams{64, 1}; ++searches; return CUVS_SUCCESS;
+  *p = new cuvsCagraSearchParams{64, 1, SINGLE_CTA}; ++searches; return CUVS_SUCCESS;
 }
 cuvsError_t cuvsCagraSearchParamsDestroy(cuvsCagraSearchParams_t p)
 { delete p; --searches; return CUVS_SUCCESS; }
@@ -87,7 +87,7 @@ cuvsError_t cuvsCagraBuild(cuvsResources_t, cuvsCagraIndexParams_t p, DLManagedT
 {
   ++build_calls;
   assert(p->build_algo == NN_DESCENT && p->graph_degree == 128);
-  assert(p->intermediate_graph_degree == 256 && p->nn_descent_niter == 100);
+  assert(p->intermediate_graph_degree == 160 && p->nn_descent_niter == 6);
   assert(d->manager_ctx == nullptr && d->deleter == nullptr);
   assert(d->dl_tensor.dtype.code == kDLFloat && d->dl_tensor.dtype.bits == 32);
   if (bad("build")) return CUVS_ERROR;
@@ -115,7 +115,8 @@ cuvsError_t cuvsCagraSearch(cuvsResources_t, cuvsCagraSearchParams_t p, cuvsCagr
   if (bad("search")) return CUVS_ERROR;
   assert(f.type == NO_FILTER);
   int64_t nq = q->dl_tensor.shape[0], k = neighbors->dl_tensor.shape[1];
-  assert(p->itopk_size == (size_t)std::max<int64_t>(512, k * 4) && p->search_width == 4);
+  assert(p->itopk_size == (size_t)std::max<int64_t>(2048, k * 4) && p->search_width == 4);
+  assert(p->algo == MULTI_CTA);
   assert(q->dl_tensor.shape[1] == idx->dim && k <= idx->n);
   for (int64_t row = 0; row < nq; ++row) {
     for (int64_t column = 0; column < k; ++column) {
