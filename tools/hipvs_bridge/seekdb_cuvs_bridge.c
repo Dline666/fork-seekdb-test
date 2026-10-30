@@ -76,16 +76,12 @@ void *seekdb_cuvs_build(const float *base, long n, long dim)
   if (!h) return NULL;
   int64_t shape[2] = {n, dim};
   DLManagedTensor dataset = tensor((void *)base, shape, kDLCPU, kDLFloat);
-  // FP32 NN_DESCENT CAGRA, final graph degree 128 (unchanged from V5).
-  // The fixed hipVS NN-descent never meets its termination threshold on
-  // 250K inputs, so V5's niter=100 always ran 100 rounds; Recall saturates
-  // after a few rounds. Measured on gfx1100 (250K, 128-D and 256-D sets):
-  // intermediate 160 / 6 rounds builds the graph in ~3.3 s versus ~18 s,
-  // with Recall@10/@100 equal to or above the 256/100 graph.
+  // Keep V5's FP32 NN_DESCENT 128/256/100 graph construction. A faster
+  // 128/160/6 graph lost Recall on real-world 256-D data.
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 160;
-  h->ip->nn_descent_niter = 6;
+  h->ip->intermediate_graph_degree = 256;
+  h->ip->nn_descent_niter = 100;
   if (cuvsCagraBuild(h->res, h->ip, &dataset, h->idx) != CUVS_SUCCESS ||
       cuvsStreamSync(h->res) != CUVS_SUCCESS) {
     fprintf(stderr, "[seekdb_cuvs] build failed: %s\n", cuvsGetLastErrorText());
